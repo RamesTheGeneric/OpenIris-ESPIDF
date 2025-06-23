@@ -78,11 +78,11 @@ void CameraManager::setupCameraPinout()
 
       // this causes problems
       .pixel_format = PIXFORMAT_JPEG,  // YUV422,GRAYSCALE,RGB565,JPEG
-      .frame_size = FRAMESIZE_240X240, // QQVGA-UXGA, For ESP32, do not use sizes above QVGA when not JPEG. The performance of the ESP32-S series has improved a lot, but JPEG mode always gives better frame rates.
+      .frame_size = FRAMESIZE_QQVGA, // QQVGA-UXGA, For ESP32, do not use sizes above QVGA when not JPEG. The performance of the ESP32-S series has improved a lot, but JPEG mode always gives better frame rates.
 
-      .jpeg_quality = 15,                   // 0-63, for OV series camera sensors, lower number means higher quality
+      .jpeg_quality = 10,                   // 0-63, for OV series camera sensors, lower number means higher quality
       .fb_count = 2,                       // 3                    // When jpeg mode is used, if fb_count more than one, the driver will work in continuous mode.
-      .fb_location = CAMERA_FB_IN_PSRAM,   // maybe it cannot put them fully in psram?
+      .fb_location = CAMERA_FB_IN_DRAM,   // maybe it cannot put them fully in psram?
       .grab_mode = CAMERA_GRAB_WHEN_EMPTY, // CAMERA_GRAB_LATEST
   };
 }
@@ -95,7 +95,7 @@ void CameraManager::setupBasicResolution()
     ESP_LOGE(CAMERA_MANAGER_TAG, "PSRAM not initialized!");
     ESP_LOGD(CAMERA_MANAGER_TAG, "Setting fb_location to CAMERA_FB_IN_DRAM with lower picture quality");
     config.fb_location = CAMERA_FB_IN_DRAM;
-    config.jpeg_quality = 15;
+    config.jpeg_quality = 10;
     config.fb_count = 2;
     return;
   }
@@ -163,7 +163,7 @@ void CameraManager::setupCameraSensor()
           // 4 - Green Tint, 5 - Blue Tint, 6 - Sepia)
 
   // it gets overriden somewhere somehow
-  camera_sensor->set_framesize(camera_sensor, FRAMESIZE_240X240);
+  camera_sensor->set_framesize(camera_sensor, FRAMESIZE_QQVGA);
   ESP_LOGI(CAMERA_MANAGER_TAG, "Setting up camera sensor done");
 }
 

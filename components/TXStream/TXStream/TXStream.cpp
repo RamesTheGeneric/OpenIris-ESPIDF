@@ -100,7 +100,7 @@ void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
         }
 
         offset += chunk_len;
-        vTaskDelay(pdMS_TO_TICKS(3)); // Slightly longer delay to avoid congestion
+        vTaskDelay(pdMS_TO_TICKS(2)); // Slightly longer delay to avoid congestion
     }
     //printf("Sent Frame");
     
