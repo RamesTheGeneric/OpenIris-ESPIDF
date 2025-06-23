@@ -10,6 +10,7 @@
 
 #include "esp_event.h"
 #include "esp_wifi.h"
+#include "esp_netif.h"
 #include "esp_log.h"
 
 #define EXAMPLE_ESP_MAXIMUM_RETRY 3
@@ -44,6 +45,7 @@ private:
   void ConnectWithHardcodedCredentials();
   void ConnectWithStoredCredentials();
   void SetupAccessPoint();
+  void SetupWirelessTX();
 
 public:
   WiFiManager(std::shared_ptr<ProjectConfig> deviceConfig, QueueHandle_t eventQueue, StateManager *stateManager);

@@ -165,8 +165,21 @@ void WiFiManager::SetupAccessPoint()
   ESP_LOGI(WIFI_MANAGER_TAG, "AP started.");
 }
 
+
 void WiFiManager::Begin()
 {
+  
+  #ifndef CONFIG_TX_STREAM
+  ESP_LOGI(WIFI_MANAGER_TAG, "Beginning TX Startup");
+  esp_netif_init();
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_mode(WIFI_MODE_STA);
+  esp_wifi_start();
+  esp_wifi_set_channel(13, WIFI_SECOND_CHAN_NONE);
+  ESP_LOGI(WIFI_MANAGER_TAG, "TX started.");
+  #else
+  
   s_wifi_event_group = xEventGroupCreate();
 
   ESP_ERROR_CHECK(esp_netif_init());
@@ -216,4 +229,5 @@ void WiFiManager::Begin()
     esp_netif_destroy(netif);
     this->SetupAccessPoint();
   }
+  #endif
 }

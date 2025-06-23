@@ -25,6 +25,11 @@
 #include <UVCStream.hpp>
 #endif
 
+#ifdef CONFIG_TX_MODE
+#include <TXStream.hpp>
+#endif
+//#include <TXStream.hpp>
+
 #define BLINK_GPIO (gpio_num_t) CONFIG_BLINK_GPIO
 #define CONFIG_LED_C_PIN_GPIO (gpio_num_t) CONFIG_LED_C_PIN
 
@@ -45,6 +50,11 @@ MDNSManager mdnsManager(deviceConfig, eventQueue);
 
 std::shared_ptr<CameraManager> cameraHandler = std::make_shared<CameraManager>(deviceConfig, eventQueue);
 StreamServer streamServer(80, stateManager);
+
+#ifdef CONFIG_TX_MODE
+TXStream txStream(13);
+#endif 
+
 
 auto *restAPI = new RestAPI("http://0.0.0.0:81", commandManager);
 
@@ -89,7 +99,13 @@ void start_video_streaming(void *arg)
     if (!deviceConfig->getWifiConfigs().empty() || strcmp(CONFIG_WIFI_SSID, "") != 0) {
         // make sure the server runs on a separate core
         ESP_LOGI("[MAIN]", "WiFi setup detected, starting WiFi streaming.");
+# ifdef CONFIG_TX_MODE
+        txStream.startStream();
+        
+        // put TX stream here
+#else
         streamServer.startStreamServer();
+#endif
     } else {
 #ifdef CONFIG_WIRED_MODE
         ESP_LOGI("[MAIN]", "UVC setup detected, starting UVC streaming.");
@@ -221,6 +237,7 @@ extern "C" void app_main(void)
     timerHandle = createStartVideoStreamingTimer(serialManagerHandle);
     if (timerHandle != nullptr)
     {
-        esp_timer_start_once(timerHandle, 30000000); // 30s
+        //esp_timer_start_once(timerHandle, 30000000); // 30s
+        esp_timer_start_once(timerHandle, 1000000); // 1s
     }
 }
