@@ -52,9 +52,16 @@ std::shared_ptr<CameraManager> cameraHandler = std::make_shared<CameraManager>(d
 StreamServer streamServer(80, stateManager);
 
 #ifdef CONFIG_TX_MODE
-TXStream txStream(13);
-#endif 
+bool isTX = true;
+#else
+bool isTX = false;
+#endif
 
+#ifdef CONFIG_RX_MODE
+bool isRX = true;
+#else
+bool isRX = false;
+#endif
 
 auto *restAPI = new RestAPI("http://0.0.0.0:81", commandManager);
 
@@ -99,7 +106,7 @@ void start_video_streaming(void *arg)
     if (!deviceConfig->getWifiConfigs().empty() || strcmp(CONFIG_WIFI_SSID, "") != 0) {
         // make sure the server runs on a separate core
         ESP_LOGI("[MAIN]", "WiFi setup detected, starting WiFi streaming.");
-# ifdef CONFIG_TX_MODE
+#ifdef CONFIG_TX_MODE
         txStream.startStream();
         
         // put TX stream here

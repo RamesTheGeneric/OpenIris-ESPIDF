@@ -25,14 +25,6 @@ void TXStream::startStream()
             _jpg_buf_len = fb->len;
             _jpg_buf = fb->buf;
             TXStream::send_jpeg_frame(_jpg_buf, _jpg_buf_len);
-            //uint8_t len_bytes[2];
-            //fwrite(ETVR_HEADER, 1, 2, stdout);
-            //fwrite(ETVR_HEADER_FRAME, 1, 2, stdout);
-            //len_bytes[0] = fb->len & 0xFF;
-            //len_bytes[1] = (fb->len >> 8) & 0xFF;
-            //fwrite(len_bytes, 1, 2, stdout);
-            //fwrite(fb->buf, 1, fb->len, stdout);
-            //fflush(stdout);
             
             // Don't forget to return the frame buffer!
             esp_camera_fb_return(fb);
@@ -100,7 +92,7 @@ void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
         }
 
         offset += chunk_len;
-        vTaskDelay(pdMS_TO_TICKS(2)); // Slightly longer delay to avoid congestion
+        vTaskDelay(pdMS_TO_TICKS(3)); // Slightly longer delay to avoid congestion
     }
     //printf("Sent Frame");
     

@@ -2,6 +2,18 @@
 
 static auto WIFI_MANAGER_TAG = "[WIFI_MANAGER]";
 
+#ifdef CONFIG_TX_STREAM
+bool isTX = true;
+#else
+bool isTX = false;
+#endif
+
+#ifdef CONFIG_RX_STREAM
+bool isRX = true;
+#else
+bool isRX = false;
+#endif
+
 void WiFiManagerHelpers::event_handler(void *arg, esp_event_base_t event_base,
                                        int32_t event_id, void *event_data)
 {
@@ -169,17 +181,29 @@ void WiFiManager::SetupAccessPoint()
 void WiFiManager::Begin()
 {
   
-  #ifndef CONFIG_TX_STREAM
-  ESP_LOGI(WIFI_MANAGER_TAG, "Beginning TX Startup");
-  esp_netif_init();
-  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  esp_wifi_init(&cfg);
-  esp_wifi_set_mode(WIFI_MODE_STA);
-  esp_wifi_start();
-  esp_wifi_set_channel(13, WIFI_SECOND_CHAN_NONE);
-  ESP_LOGI(WIFI_MANAGER_TAG, "TX started.");
-  #else
-  
+  if (isTX){          // This switching bs doesn't work rn, figure it out later
+    ESP_LOGI(WIFI_MANAGER_TAG, "Beginning TX Startup");
+    esp_netif_init();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
+    esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
+    ESP_LOGI(WIFI_MANAGER_TAG, "TX started.");
+  }
+  if (isRX){
+    ESP_LOGI(WIFI_MANAGER_TAG, "Beginning RX Startup");
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    esp_wifi_set_mode(WIFI_MODE_NULL);
+    esp_wifi_start();
+    esp_wifi_set_channel(CHANNEL, WIFI_SECOND_CHAN_NONE);
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(sniffer_cb)); // Make callback func in another component 
+    esp_wifi_set_promiscuous(true);
+    ESP_LOGI(WIFI_MANAGER_TAG, "RX started.");
+  }
+    
+  if (!isRX && !isTX){
   s_wifi_event_group = xEventGroupCreate();
 
   ESP_ERROR_CHECK(esp_netif_init());
@@ -229,5 +253,5 @@ void WiFiManager::Begin()
     esp_netif_destroy(netif);
     this->SetupAccessPoint();
   }
-  #endif
+}
 }

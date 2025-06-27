@@ -38,6 +38,10 @@ menu "OpenIris basic configuration"
         bool "Stream video using IEEE 802.11 frames to a receiver."
         default false
 
+    config RX_MODE
+        bool "Receive video using IEEE 802.11 frames from a transmitter."
+        default false
+
     config MDNS_HOSTNAME
         string "mDNS name"
         default "openiristracker"

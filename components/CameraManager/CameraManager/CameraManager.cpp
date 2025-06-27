@@ -95,7 +95,7 @@ void CameraManager::setupBasicResolution()
     ESP_LOGE(CAMERA_MANAGER_TAG, "PSRAM not initialized!");
     ESP_LOGD(CAMERA_MANAGER_TAG, "Setting fb_location to CAMERA_FB_IN_DRAM with lower picture quality");
     config.fb_location = CAMERA_FB_IN_DRAM;
-    config.jpeg_quality = 10;
+    config.jpeg_quality = 9;
     config.fb_count = 2;
     return;
   }
@@ -128,17 +128,17 @@ void CameraManager::setupCameraSensor()
 
   // controls the exposure
   camera_sensor->set_exposure_ctrl(camera_sensor,
-                                   0);              // 0 = disable , 1 = enable
+                                   1);              // 0 = disable , 1 = enable
   camera_sensor->set_aec2(camera_sensor, 0);        // 0 = disable , 1 = enable
   camera_sensor->set_ae_level(camera_sensor, 0);    // -2 to 2
-  camera_sensor->set_aec_value(camera_sensor, 100); // 0 to 1200
+  camera_sensor->set_aec_value(camera_sensor, 600); // 0 to 1200
 
   // controls the gain
-  camera_sensor->set_gain_ctrl(camera_sensor, 0); // 0 = disable , 1 = enable
+  camera_sensor->set_gain_ctrl(camera_sensor, 1); // 0 = disable , 1 = enable
 
   // automatic gain control gain, controls by how much the resulting image
   // should be amplified
-  camera_sensor->set_agc_gain(camera_sensor, 2);                   // 0 to 30
+  camera_sensor->set_agc_gain(camera_sensor, 6);                   // 0 to 30
   camera_sensor->set_gainceiling(camera_sensor, (gainceiling_t)6); // 0 to 6
 
   // black and white pixel correction, averages the white and black spots
