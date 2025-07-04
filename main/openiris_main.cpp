@@ -23,6 +23,7 @@
 
 #ifdef CONFIG_WIRED_MODE
 #include <UVCStream.hpp>
+UVCStreamManager uvcStream;
 #endif
 
 #ifdef CONFIG_TX_MODE
@@ -48,26 +49,17 @@ auto deviceConfig = std::make_shared<ProjectConfig>(&preferences);
 WiFiManager wifiManager(deviceConfig, eventQueue, stateManager);
 MDNSManager mdnsManager(deviceConfig, eventQueue);
 
+#ifndef CONFIG_RX_MODE
 std::shared_ptr<CameraManager> cameraHandler = std::make_shared<CameraManager>(deviceConfig, eventQueue);
+#endif
 StreamServer streamServer(80, stateManager);
 
 #ifdef CONFIG_TX_MODE
-bool isTX = true;
-#else
-bool isTX = false;
+TXStream txStream = TXStream(6);
 #endif
 
-#ifdef CONFIG_RX_MODE
-bool isRX = true;
-#else
-bool isRX = false;
-#endif
 
 auto *restAPI = new RestAPI("http://0.0.0.0:81", commandManager);
-
-#ifdef CONFIG_WIRED_MODE
-UVCStreamManager uvcStream;
-#endif
 
 auto *ledManager = new LEDManager(BLINK_GPIO, CONFIG_LED_C_PIN_GPIO, ledStateQueue);
 auto *serialManager = new SerialManager(commandManager, &timerHandle);
@@ -147,7 +139,9 @@ extern "C" void app_main(void)
 {
     TaskHandle_t *serialManagerHandle = nullptr;
     dependencyRegistry->registerService<ProjectConfig>(DependencyType::project_config, deviceConfig);
+    #ifndef CONFIG_RX_MODE
     dependencyRegistry->registerService<CameraManager>(DependencyType::camera_manager, cameraHandler);
+    #endif
     // uvc plan
     // cleanup the logs - done
     // prepare the camera to be initialized with UVC - done?
@@ -220,6 +214,10 @@ extern "C" void app_main(void)
     deviceConfig->load();
     serialManager->setup();
 
+    #if defined(CONFIG_WIRED_MODE) && defined(CONFIG_RX_MODE)
+    // Initialize UVC stream early in RX mode since WiFi callbacks will use it
+    uvcStream.setup();
+    #endif
     xTaskCreate(
         HandleSerialManagerTask,
         "HandleSerialManagerTask",
@@ -231,7 +229,14 @@ extern "C" void app_main(void)
     wifiManager.Begin();
     mdnsManager.start();
     restAPI->begin();
+    #ifdef CONFIG_RX_MODE
+    wifiManager.setJpegFrameCallback([&](uint8_t* frameBuffer, uint16_t length) {
+        uvcStream.provide_jpeg_frame(frameBuffer, length);
+    });
+    ESP_LOGI("[MAIN]", "Set WiFi Manger jpeg callback");
+    #else
     cameraHandler->setupCamera();
+    #endif
 
     xTaskCreate(
         HandleRestAPIPollTask,
@@ -240,11 +245,12 @@ extern "C" void app_main(void)
         restAPI,
         1, // it's the rest API, we only serve commands over it so we don't really need a higher priority
         nullptr);
-
+    #ifndef CONFIG_RX_MODE
     timerHandle = createStartVideoStreamingTimer(serialManagerHandle);
     if (timerHandle != nullptr)
     {
         //esp_timer_start_once(timerHandle, 30000000); // 30s
         esp_timer_start_once(timerHandle, 1000000); // 1s
     }
+    #endif
 }

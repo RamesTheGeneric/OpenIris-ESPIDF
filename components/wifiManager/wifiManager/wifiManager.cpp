@@ -2,17 +2,23 @@
 
 static auto WIFI_MANAGER_TAG = "[WIFI_MANAGER]";
 
-#ifdef CONFIG_TX_STREAM
-bool isTX = true;
-#else
-bool isTX = false;
-#endif
+//Start Receiver Vars
+#define MAX_CHUNKS 512
+#define VENDOR_OUI          {0xAC,0xDE,0x47}
+static const uint8_t vendor_oui[3] = VENDOR_OUI;
+#define MAX_PAYLOAD_SIZE 200
+#define MAX_FRAME_SIZE (10*1024)
+#define UART_PORT UART_NUM_0
 
-#ifdef CONFIG_RX_STREAM
-bool isRX = true;
-#else
-bool isRX = false;
-#endif
+static uint8_t frame_buf[MAX_FRAME_SIZE];
+static uint8_t current_frame_id = 0xFF;
+static uint8_t expected_chunks = 0;
+static uint8_t received_chunks = 0;
+static uint8_t chunk_map[MAX_CHUNKS / 8];
+
+static JpegFrameCallback g_jpegFrameCallback = nullptr;
+
+//End Receiver Vars
 
 void WiFiManagerHelpers::event_handler(void *arg, esp_event_base_t event_base,
                                        int32_t event_id, void *event_data)
@@ -177,11 +183,69 @@ void WiFiManager::SetupAccessPoint()
   ESP_LOGI(WIFI_MANAGER_TAG, "AP started.");
 }
 
+static inline bool all_chunks_received(uint8_t total_chunks) {
+    for (int i = 0; i < total_chunks; ++i) {
+        if (!(chunk_map[i / 8] & (1 << (i % 8)))) return false;
+    }
+    return true;
+}
+
+// Add this method to the WiFiManager class
+void WiFiManager::setJpegFrameCallback(JpegFrameCallback callback) {
+    g_jpegFrameCallback = callback;
+}
+// Update your sniffer_cb function
+static void sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t t)
+{
+    const wifi_promiscuous_pkt_t *ppkt = (wifi_promiscuous_pkt_t *)buf;
+    const uint8_t *payload = ppkt->payload;
+    if ((payload[0] & 0xFC) != 0xD0) return;
+    const uint8_t *action = payload + 24;
+    if (action[0] != 127) return;
+    if (memcmp(&action[1], vendor_oui, 3) != 0) return;
+    uint8_t frame_id = action[4];
+    uint8_t chunk_id = action[5];
+    uint8_t total_chunks = action[6];
+    const uint8_t *jpeg_data = &action[7];
+    int jpeg_len = ppkt->rx_ctrl.sig_len - (jpeg_data - payload);
+    
+    if (frame_id != current_frame_id) {
+        current_frame_id = frame_id;
+        expected_chunks = total_chunks;
+        received_chunks = 0;
+        memset(frame_buf, 0, sizeof(frame_buf));
+        memset(chunk_map, 0, sizeof(chunk_map));
+    }
+    
+    if (chunk_id < expected_chunks) {
+        if (!(chunk_map[chunk_id / 8] & (1 << (chunk_id % 8)))) {
+            chunk_map[chunk_id / 8] |= (1 << (chunk_id % 8));
+            memcpy(frame_buf + chunk_id * MAX_PAYLOAD_SIZE, jpeg_data, jpeg_len);
+            received_chunks++;
+        }
+    }
+    
+    if (received_chunks == expected_chunks && all_chunks_received(expected_chunks)) {
+        uint16_t total_length = expected_chunks * MAX_PAYLOAD_SIZE;
+        // Trim excess to JPEG end marker (FFD9)
+        while (total_length > 2 && !(frame_buf[total_length - 2] == 0xFF && frame_buf[total_length - 1] == 0xD9)) {
+            total_length--;
+        }
+        printf("Received complete JPEG (%d chunks, %d bytes)\n", expected_chunks, total_length);
+        
+        // Call the provide_jpeg_frame method via callback
+        printf("At Callback \n");
+        if (g_jpegFrameCallback) {
+            printf("Running Callback \n");
+            g_jpegFrameCallback(frame_buf, total_length);
+            printf("End Callback \n");
+        }
+    }
+}
 
 void WiFiManager::Begin()
 {
-  
-  if (isTX){          // This switching bs doesn't work rn, figure it out later
+  #ifdef CONFIG_TX_MODE        // This switching bs doesn't work rn, figure it out later
     ESP_LOGI(WIFI_MANAGER_TAG, "Beginning TX Startup");
     esp_netif_init();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -190,20 +254,22 @@ void WiFiManager::Begin()
     esp_wifi_start();
     esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
     ESP_LOGI(WIFI_MANAGER_TAG, "TX started.");
-  }
-  if (isRX){
+  #endif
+
+  #ifdef CONFIG_RX_MODE
     ESP_LOGI(WIFI_MANAGER_TAG, "Beginning RX Startup");
+    esp_netif_init();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
     esp_wifi_set_mode(WIFI_MODE_NULL);
     esp_wifi_start();
-    esp_wifi_set_channel(CHANNEL, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE); // Left Eye 6 | Right Eye 13
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(sniffer_cb)); // Make callback func in another component 
     esp_wifi_set_promiscuous(true);
     ESP_LOGI(WIFI_MANAGER_TAG, "RX started.");
-  }
+  #endif
     
-  if (!isRX && !isTX){
+  #if !defined(CONFIG_TX_MODE) && !defined(CONFIG_RX_MODE)
   s_wifi_event_group = xEventGroupCreate();
 
   ESP_ERROR_CHECK(esp_netif_init());
@@ -253,5 +319,6 @@ void WiFiManager::Begin()
     esp_netif_destroy(netif);
     this->SetupAccessPoint();
   }
+  #endif
 }
-}
+
