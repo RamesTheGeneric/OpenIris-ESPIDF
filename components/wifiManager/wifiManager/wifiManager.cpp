@@ -252,7 +252,8 @@ void WiFiManager::Begin()
     esp_wifi_init(&cfg);
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_start();
-    esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA, WIFI_PHY_RATE_54M);
     ESP_LOGI(WIFI_MANAGER_TAG, "TX started.");
   #endif
 
@@ -263,7 +264,7 @@ void WiFiManager::Begin()
     esp_wifi_init(&cfg);
     esp_wifi_set_mode(WIFI_MODE_NULL);
     esp_wifi_start();
-    esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE); // Left Eye 6 | Right Eye 13
+    esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE); // Left Eye 6 | Right Eye 13 || Babble 3
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(sniffer_cb)); // Make callback func in another component 
     esp_wifi_set_promiscuous(true);
     ESP_LOGI(WIFI_MANAGER_TAG, "RX started.");

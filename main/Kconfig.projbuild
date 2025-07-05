@@ -34,6 +34,10 @@ menu "OpenIris basic configuration"
         bool "Wired mode"
         default false
 
+    config WIFI_CHANNEL
+        int "WiFi channel to transmit/receive on."
+        default 1
+
     config TX_MODE
         bool "Stream video using IEEE 802.11 frames to a receiver."
         depends on !CONFIG_RX_MODE

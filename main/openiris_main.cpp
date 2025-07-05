@@ -99,7 +99,9 @@ void start_video_streaming(void *arg)
         // make sure the server runs on a separate core
         ESP_LOGI("[MAIN]", "WiFi setup detected, starting WiFi streaming.");
 #ifdef CONFIG_TX_MODE
+        ESP_LOGI("[MAIN]", "Starting TX Streaming");
         txStream.startStream();
+        ESP_LOGI("[MAIN]", "Starting TX Streaming");
         
         // put TX stream here
 #else

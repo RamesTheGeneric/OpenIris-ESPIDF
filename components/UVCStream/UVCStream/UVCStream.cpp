@@ -26,7 +26,7 @@ static esp_err_t UVCStreamHelpers::camera_start_cb(uvc_format_t format, int widt
     return ESP_ERR_NOT_SUPPORTED;
   }
 
-  if (width == 160 && height == 120)
+  if (width == frameWidth && height == frameHeight)
   {
     #ifndef CONFIG_RX_MODE
     frame_size = FRAMESIZE_QQVGA;
