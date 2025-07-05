@@ -2,7 +2,6 @@
 #ifndef UVCSTREAM_HPP
 #define UVCSTREAM_HPP
 #include "esp_timer.h"
-#include "esp_mac.h"
 #include "esp_camera.h"
 #include <CameraManager.hpp>
 #include <StateManager.hpp>
@@ -10,22 +9,11 @@
 #include "usb_device_uvc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 // we need access to the camera manager
 // in order to update the frame settings
 extern std::shared_ptr<CameraManager> cameraHandler;
-extern std::shared_ptr<ProjectConfig> deviceConfig;
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-  const char *get_uvc_device_name();
-  const char *get_serial_number(void);
-
-#ifdef __cplusplus
-}
-#endif
 
 // we also need a way to inform the rest of the system of what's happening
 extern QueueHandle_t eventQueue;
@@ -34,6 +22,9 @@ namespace UVCStreamHelpers
 {
   // TODO move the camera handling code to the camera manager and have the uvc manager initialize it in wired mode
 
+  extern uint16_t frameWidth;
+  extern uint16_t frameHeight;
+
   typedef struct
   {
     camera_fb_t *cam_fb_p;
@@ -41,6 +32,17 @@ namespace UVCStreamHelpers
   } fb_t;
 
   static fb_t s_fb;
+
+  #ifdef CONFIG_RX_MODE
+  typedef struct{
+    uint8_t *buf;
+    size_t len;
+  } jpeg_fb_t;
+
+  static jpeg_fb_t jpeg_s_fb;
+  static bool stream_active;
+  static SemaphoreHandle_t frame_ready_sem;
+  #endif
 
   static esp_err_t camera_start_cb(uvc_format_t format, int width, int height, int rate, void *cb_ctx);
   static void camera_stop_cb(void *cb_ctx);
@@ -54,6 +56,9 @@ class UVCStreamManager
 
 public:
   esp_err_t setup();
+  #ifdef CONFIG_RX_MODE
+  void provide_jpeg_frame(uint8_t *jpeg_data, size_t jpeg_len);
+  #endif
 };
 
 #endif // UVCSTREAM_HPP

@@ -5,11 +5,13 @@
 #include <string>
 #include <cstring>
 #include <algorithm>
+#include <functional>
 #include <StateManager.hpp>
 #include <ProjectConfig.hpp>
 
 #include "esp_event.h"
 #include "esp_wifi.h"
+#include "esp_netif.h"
 #include "esp_log.h"
 
 #define EXAMPLE_ESP_MAXIMUM_RETRY 3
@@ -18,6 +20,8 @@
 
 static int s_retry_num = 0;
 static EventGroupHandle_t s_wifi_event_group;
+
+typedef std::function<void(uint8_t*, size_t)> JpegFrameCallback;
 
 namespace WiFiManagerHelpers
 {
@@ -44,10 +48,12 @@ private:
   void ConnectWithHardcodedCredentials();
   void ConnectWithStoredCredentials();
   void SetupAccessPoint();
+  void SetupWirelessTX();
 
 public:
   WiFiManager(std::shared_ptr<ProjectConfig> deviceConfig, QueueHandle_t eventQueue, StateManager *stateManager);
   void Begin();
+  void setJpegFrameCallback(JpegFrameCallback callback);
 };
 
 #endif

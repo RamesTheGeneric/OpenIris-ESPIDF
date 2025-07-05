@@ -25,6 +25,10 @@
 #include <UVCStream.hpp>
 #endif
 
+#ifdef CONFIG_TX_MODE
+#include <TXStream.hpp>
+#endif
+
 #define BLINK_GPIO (gpio_num_t) CONFIG_BLINK_GPIO
 #define CONFIG_LED_C_PIN_GPIO (gpio_num_t) CONFIG_LED_C_PIN
 
@@ -43,8 +47,14 @@ std::shared_ptr<ProjectConfig> deviceConfig = std::make_shared<ProjectConfig>(&p
 WiFiManager wifiManager(deviceConfig, eventQueue, stateManager);
 MDNSManager mdnsManager(deviceConfig, eventQueue);
 
+#ifndef CONFIG_RX_MODE
 std::shared_ptr<CameraManager> cameraHandler = std::make_shared<CameraManager>(deviceConfig, eventQueue);
 StreamServer streamServer(80, stateManager);
+#endif
+
+#ifdef CONFIG_TX_MODE
+TXStream txStream = TXStream(6);
+#endif
 
 auto *restAPI = new RestAPI("http://0.0.0.0:81", commandManager);
 
@@ -77,6 +87,7 @@ void disable_serial_manager_task(TaskHandle_t serialManagerHandle) {
 // After setting everything up, we start a 30s timer with this as a callback
 // if we get anything on the serial, we stop the timer and reset it after the commands are done
 // this is done to ensure the user has enough time to configure the board if need be
+#if !defined(CONFIG_TX_MODE) || !defined(CONFIG_RX_MODE)
 void start_video_streaming(void *arg) {
     // if we're in auto-mode, we can decide which streaming helper to start based on the
     // presence of Wi-Fi credentials
@@ -105,6 +116,7 @@ void start_video_streaming(void *arg) {
     const auto serialTaskHandle = static_cast<TaskHandle_t>(arg);
     disable_serial_manager_task(serialTaskHandle);
 }
+#endif
 
 esp_timer_handle_t createStartVideoStreamingTimer(void *pvParameter) {
     esp_timer_handle_t handle;
@@ -124,7 +136,9 @@ esp_timer_handle_t createStartVideoStreamingTimer(void *pvParameter) {
 extern "C" void app_main(void) {
     TaskHandle_t *serialManagerHandle = nullptr;
     dependencyRegistry->registerService<ProjectConfig>(DependencyType::project_config, deviceConfig);
+    #ifndef CONFIG_RX_MODE
     dependencyRegistry->registerService<CameraManager>(DependencyType::camera_manager, cameraHandler);
+    #endif
     // uvc plan
     // cleanup the logs - done
     // prepare the camera to be initialized with UVC - done?
@@ -218,8 +232,20 @@ extern "C" void app_main(void) {
         1, // it's the rest API, we only serve commands over it so we don't really need a higher priority
         nullptr);
 
+    #ifdef CONFIG_TX_MODE       // For TX and RX, we ignore the wireless to wired switching logic. 
+        txStream.startStream();
+    #endif
+
+    #if defined(CONFIG_WIRED_MODE) && defined(CONFIG_RX_MODE)
+    // Initialize UVC stream early in RX mode since WiFi callbacks will use it
+    uvcStream.setup();
+    #endif
+
+    #if !defined(CONFIG_TX_MODE) && !defined(CONFIG_RX_MODE) // Go straight to the role when in TX/RX mode
     timerHandle = createStartVideoStreamingTimer(serialManagerHandle);
     if (timerHandle != nullptr) {
-        esp_timer_start_once(timerHandle, 30000000); // 30s
+        //esp_timer_start_once(timerHandle, 30000000); // 30s
+        esp_timer_start_once(timerHandle, 1000000); // 1s
     }
+    #endif
 }
