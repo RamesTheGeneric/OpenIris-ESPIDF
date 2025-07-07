@@ -6,15 +6,19 @@ static auto WIFI_MANAGER_TAG = "[WIFI_MANAGER]";
 #define MAX_CHUNKS 512
 #define VENDOR_OUI          {0xAC,0xDE,0x47}
 static const uint8_t vendor_oui[3] = VENDOR_OUI;
-#define MAX_PAYLOAD_SIZE 200
-#define MAX_FRAME_SIZE (10*1024)
+#define MAX_PAYLOAD_SIZE 1400  
+#define MAX_FRAME_SIZE (50*1024)  
 #define UART_PORT UART_NUM_0
+
+// Custom EtherType
+#define CUSTOM_ETHERTYPE 0x88B5
 
 static uint8_t frame_buf[MAX_FRAME_SIZE];
 static uint8_t current_frame_id = 0xFF;
 static uint8_t expected_chunks = 0;
 static uint8_t received_chunks = 0;
 static uint8_t chunk_map[MAX_CHUNKS / 8];
+static uint32_t frame_start_time = 0;
 
 static JpegFrameCallback g_jpegFrameCallback = nullptr;
 
@@ -60,7 +64,6 @@ WiFiManager::WiFiManager(std::shared_ptr<ProjectConfig> deviceConfig, QueueHandl
 void WiFiManager::SetCredentials(const char *ssid, const char *password)
 {
   memcpy(_wifi_cfg.sta.ssid, ssid, std::min(strlen(ssid), sizeof(_wifi_cfg.sta.ssid)));
-
   memcpy(_wifi_cfg.sta.password, password, std::min(strlen(password), sizeof(_wifi_cfg.sta.password)));
 }
 
@@ -82,8 +85,6 @@ void WiFiManager::ConnectWithHardcodedCredentials()
                                          pdFALSE,
                                          portMAX_DELAY);
 
-  /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
-   * happened. */
   if (bits & WIFI_CONNECTED_BIT)
   {
     ESP_LOGI(WIFI_MANAGER_TAG, "connected to ap SSID:%p password:%p",
@@ -92,7 +93,6 @@ void WiFiManager::ConnectWithHardcodedCredentials()
     event.value = WiFiState_e::WiFiState_Connected;
     xQueueSend(this->eventQueue, &event, 10);
   }
-
   else if (bits & WIFI_FAIL_BIT)
   {
     ESP_LOGE(WIFI_MANAGER_TAG, "Failed to connect to SSID:%p, password:%p",
@@ -126,7 +126,6 @@ void WiFiManager::ConnectWithStoredCredentials()
     xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
     this->SetCredentials(network.ssid.c_str(), network.password.c_str());
 
-    // we need to update the config after every credential change
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &_wifi_cfg));
     xQueueSend(this->eventQueue, &event, 10);
 
@@ -147,7 +146,6 @@ void WiFiManager::ConnectWithStoredCredentials()
 
       event.value = WiFiState_e::WiFiState_Connected;
       xQueueSend(this->eventQueue, &event, 10);
-
       return;
     }
     ESP_LOGE(WIFI_MANAGER_TAG, "Failed to connect to SSID:%p, password:%p, trying next stored network",
@@ -173,7 +171,6 @@ void WiFiManager::SetupAccessPoint()
           .ssid = CONFIG_AP_WIFI_SSID,
           .password = CONFIG_AP_WIFI_PASSWORD,
           .max_connection = 1,
-
       },
   };
 
@@ -190,62 +187,126 @@ static inline bool all_chunks_received(uint8_t total_chunks) {
     return true;
 }
 
-// Add this method to the WiFiManager class
 void WiFiManager::setJpegFrameCallback(JpegFrameCallback callback) {
     g_jpegFrameCallback = callback;
 }
-// Update your sniffer_cb function
+
+// Updated sniffer callback for data packets
 static void sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t t)
 {
     const wifi_promiscuous_pkt_t *ppkt = (wifi_promiscuous_pkt_t *)buf;
     const uint8_t *payload = ppkt->payload;
-    if ((payload[0] & 0xFC) != 0xD0) return;
-    const uint8_t *action = payload + 24;
-    if (action[0] != 127) return;
-    if (memcmp(&action[1], vendor_oui, 3) != 0) return;
-    uint8_t frame_id = action[4];
-    uint8_t chunk_id = action[5];
-    uint8_t total_chunks = action[6];
-    const uint8_t *jpeg_data = &action[7];
-    int jpeg_len = ppkt->rx_ctrl.sig_len - (jpeg_data - payload);
     
+    // Check if it's a regular data frame (frame control = 0x08, not 0x88)
+    if ((payload[0] & 0xFC) != 0x08) return;
+    
+    // Skip to LLC/SNAP header (after 802.11 header)
+    const uint8_t *llc_snap = payload + 24;
+    
+    // Verify LLC/SNAP header for our custom protocol
+    if (llc_snap[0] != 0xAA || llc_snap[1] != 0xAA || llc_snap[2] != 0x03) return;
+    if (llc_snap[3] != 0x00 || llc_snap[4] != 0x00 || llc_snap[5] != 0x00) return;
+    
+    // Check our custom EtherType
+    uint16_t ethertype = (llc_snap[6] << 8) | llc_snap[7];
+    if (ethertype != CUSTOM_ETHERTYPE) return;
+    
+    // Parse our custom header
+    const uint8_t *custom_hdr = llc_snap + 8;
+    
+    // Verify OUI
+    if (memcmp(custom_hdr, vendor_oui, 3) != 0) return;
+    
+    uint8_t frame_id = custom_hdr[3];
+    uint8_t chunk_id = custom_hdr[4];
+    uint8_t total_chunks = custom_hdr[5];
+    uint16_t chunk_len = (custom_hdr[6] << 8) | custom_hdr[7];
+    
+    const uint8_t *jpeg_data = custom_hdr + 8;
+    
+    // Validate chunk length
+    int max_possible_len = ppkt->rx_ctrl.sig_len - (jpeg_data - payload) - 4; // -4 for FCS
+    if (chunk_len > max_possible_len || chunk_len > MAX_PAYLOAD_SIZE) {
+        printf("Invalid chunk length: %d (max: %d)\n", chunk_len, max_possible_len);
+        return;
+    }
+    
+    // Handle new frame
     if (frame_id != current_frame_id) {
+        if (current_frame_id != 0xFF) {
+            printf("Frame %d incomplete (%d/%d chunks), starting frame %d\n", 
+                   current_frame_id, received_chunks, expected_chunks, frame_id);
+        }
         current_frame_id = frame_id;
         expected_chunks = total_chunks;
         received_chunks = 0;
         memset(frame_buf, 0, sizeof(frame_buf));
         memset(chunk_map, 0, sizeof(chunk_map));
+        frame_start_time = esp_timer_get_time() / 1000; // ms
     }
     
-    if (chunk_id < expected_chunks) {
+    // Process chunk
+    if (chunk_id < expected_chunks && chunk_id < MAX_CHUNKS) {
         if (!(chunk_map[chunk_id / 8] & (1 << (chunk_id % 8)))) {
             chunk_map[chunk_id / 8] |= (1 << (chunk_id % 8));
-            memcpy(frame_buf + chunk_id * MAX_PAYLOAD_SIZE, jpeg_data, jpeg_len);
-            received_chunks++;
+            
+            // Calculate offset and ensure we don't overflow
+            size_t offset = chunk_id * MAX_PAYLOAD_SIZE;
+            if (offset + chunk_len <= MAX_FRAME_SIZE) {
+                memcpy(frame_buf + offset, jpeg_data, chunk_len);
+                received_chunks++;
+                
+                // Debug output for high chunk counts
+                if (received_chunks % 10 == 0) {
+                    printf("Received %d/%d chunks for frame %d\n", 
+                           received_chunks, expected_chunks, frame_id);
+                }
+            } else {
+                printf("Frame buffer overflow prevented (offset: %zu, len: %d)\n", offset, chunk_len);
+            }
         }
     }
     
+    // Check if frame is complete
     if (received_chunks == expected_chunks && all_chunks_received(expected_chunks)) {
-        uint16_t total_length = expected_chunks * MAX_PAYLOAD_SIZE;
-        // Trim excess to JPEG end marker (FFD9)
-        while (total_length > 2 && !(frame_buf[total_length - 2] == 0xFF && frame_buf[total_length - 1] == 0xD9)) {
-            total_length--;
+        // Calculate actual frame size by finding JPEG end marker
+        size_t total_length = 0;
+        for (int i = expected_chunks - 1; i >= 0; i--) {
+            size_t chunk_start = i * MAX_PAYLOAD_SIZE;
+            size_t chunk_end = chunk_start + MAX_PAYLOAD_SIZE;
+            if (chunk_end > MAX_FRAME_SIZE) chunk_end = MAX_FRAME_SIZE;
+            
+            // Look for JPEG end marker (0xFFD9) in reverse
+            for (size_t j = chunk_end - 1; j >= chunk_start && j >= 1; j--) {
+                if (frame_buf[j-1] == 0xFF && frame_buf[j] == 0xD9) {
+                    total_length = j + 1;
+                    break;
+                }
+            }
+            if (total_length > 0) break;
         }
-        printf("Received complete JPEG (%d chunks, %d bytes)\n", expected_chunks, total_length);
         
-        // Call the provide_jpeg_frame method via callback
-        printf("At Callback \n");
-        if (g_jpegFrameCallback) {
-            printf("Running Callback \n");
-            g_jpegFrameCallback(frame_buf, total_length);
-            printf("End Callback \n");
+        if (total_length == 0) {
+            total_length = expected_chunks * MAX_PAYLOAD_SIZE;
         }
+        
+        uint32_t frame_time = (esp_timer_get_time() / 1000) - frame_start_time;
+        printf("Complete JPEG frame %d: %d chunks, %zu bytes, %lu ms\n", 
+               frame_id, expected_chunks, total_length, frame_time);
+        
+        // Call the callback
+        if (g_jpegFrameCallback) {
+            g_jpegFrameCallback(frame_buf, total_length);
+        }
+        
+        // Reset for next frame
+        current_frame_id = 0xFF;
     }
 }
 
 void WiFiManager::Begin()
 {
-  #ifdef CONFIG_TX_MODE        // This switching bs doesn't work rn, figure it out later
+  #ifdef CONFIG_TX_MODE
     ESP_LOGI(WIFI_MANAGER_TAG, "Beginning TX Startup");
     esp_netif_init();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -253,8 +314,8 @@ void WiFiManager::Begin()
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_start();
     esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
-    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA, WIFI_PHY_RATE_54M);
-    ESP_LOGI(WIFI_MANAGER_TAG, "TX started.");
+    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA,  WIFI_PHY_RATE_54M);
+    ESP_LOGI(WIFI_MANAGER_TAG, "TX started on channel %d", CONFIG_WIFI_CHANNEL);
   #endif
 
   #ifdef CONFIG_RX_MODE
@@ -264,10 +325,10 @@ void WiFiManager::Begin()
     esp_wifi_init(&cfg);
     esp_wifi_set_mode(WIFI_MODE_NULL);
     esp_wifi_start();
-    esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE); // Left Eye 6 | Right Eye 13 || Babble 3
-    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(sniffer_cb)); // Make callback func in another component 
+    esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(sniffer_cb));
     esp_wifi_set_promiscuous(true);
-    ESP_LOGI(WIFI_MANAGER_TAG, "RX started.");
+    ESP_LOGI(WIFI_MANAGER_TAG, "RX started on channel %d", CONFIG_WIFI_CHANNEL);
   #endif
     
   #if !defined(CONFIG_TX_MODE) && !defined(CONFIG_RX_MODE)
@@ -322,4 +383,3 @@ void WiFiManager::Begin()
   }
   #endif
 }
-
