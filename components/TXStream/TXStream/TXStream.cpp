@@ -37,6 +37,7 @@ void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
     size_t offset = 0;
     uint8_t total_chunks = (len + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE;
     printf("Sending frame %d with %d chunks (%d bytes total)\n", frame_id, total_chunks, len);
+    vTaskDelay(pdMS_TO_TICKS(1)); // Wait slightly to let the buffer fill before transmitting
 
     while (offset < len) {
         size_t chunk_len = len - offset > MAX_PAYLOAD_SIZE ? MAX_PAYLOAD_SIZE : len - offset;
@@ -101,10 +102,8 @@ void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
         }
 
         offset += chunk_len;
-        vTaskDelay(pdMS_TO_TICKS(0.05)); // Small delay to not overload the poor thing
     }
     printf("Sent Frame %d\n", frame_id);
 
     frame_id++;
 }
-

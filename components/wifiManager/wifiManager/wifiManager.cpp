@@ -192,6 +192,7 @@ void WiFiManager::setJpegFrameCallback(JpegFrameCallback callback) {
 }
 
 // Updated sniffer callback for data packets
+// Updated sniffer callback for data packets
 static void sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t t)
 {
     const wifi_promiscuous_pkt_t *ppkt = (wifi_promiscuous_pkt_t *)buf;
@@ -250,7 +251,7 @@ static void sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t t)
         if (!(chunk_map[chunk_id / 8] & (1 << (chunk_id % 8)))) {
             chunk_map[chunk_id / 8] |= (1 << (chunk_id % 8));
             
-            // Calculate offset and ensure we don't overflow
+            // Calculate offset
             size_t offset = chunk_id * MAX_PAYLOAD_SIZE;
             if (offset + chunk_len <= MAX_FRAME_SIZE) {
                 memcpy(frame_buf + offset, jpeg_data, chunk_len);
@@ -299,8 +300,8 @@ static void sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t t)
             g_jpegFrameCallback(frame_buf, total_length);
         }
         
-        // Reset for next frame
-        current_frame_id = 0xFF;
+        // Reset for next frame - don't reset to 0xFF, keep the current frame_id
+        // This way we can properly track the next frame transition
     }
 }
 
@@ -326,6 +327,11 @@ void WiFiManager::Begin()
     esp_wifi_set_mode(WIFI_MODE_NULL);
     esp_wifi_start();
     esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+        // Configure promiscuous filter to only receive data packets
+    wifi_promiscuous_filter_t filter = {
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&filter));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(sniffer_cb));
     esp_wifi_set_promiscuous(true);
     ESP_LOGI(WIFI_MANAGER_TAG, "RX started on channel %d", CONFIG_WIFI_CHANNEL);
