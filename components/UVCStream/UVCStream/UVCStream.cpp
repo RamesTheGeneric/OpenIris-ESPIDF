@@ -167,15 +167,34 @@ esp_err_t UVCStreamManager::setup()
 #ifdef CONFIG_RX_MODE
 void UVCStreamManager::provide_jpeg_frame(uint8_t *jpeg_data, size_t jpeg_len)
 {
-  //if (!UVCStreamHelpers::stream_active || !jpeg_data || jpeg_len == 0)
-  //{
-  //  return;
-  //}
+  if (!jpeg_data || jpeg_len == 0 || jpeg_len > UVC_MAX_FRAMESIZE_SIZE)
+  {
+    ESP_LOGW(UVC_STREAM_TAG, "Invalid JPEG frame input");
+    return;
+  }
 
-  // Set up the frame data
-  UVCStreamHelpers::jpeg_s_fb.buf = jpeg_data;
+  // Free any previously allocated buffer
+  if (UVCStreamHelpers::jpeg_s_fb.buf != nullptr)
+  {
+    free(UVCStreamHelpers::jpeg_s_fb.buf);
+    UVCStreamHelpers::jpeg_s_fb.buf = nullptr;
+    UVCStreamHelpers::jpeg_s_fb.len = 0;
+  }
+
+  // Allocate and copy JPEG data into a new buffer
+  uint8_t *new_buf = (uint8_t *)malloc(jpeg_len);
+  if (!new_buf)
+  {
+    ESP_LOGE(UVC_STREAM_TAG, "Failed to allocate memory for JPEG frame");
+    return;
+  }
+  memcpy(new_buf, jpeg_data, jpeg_len);
+
+  // Store in shared buffer struct
+  UVCStreamHelpers::jpeg_s_fb.buf = new_buf;
   UVCStreamHelpers::jpeg_s_fb.len = jpeg_len;
-  ESP_LOGE(UVC_STREAM_TAG, "Submited a Frame");
+
+  ESP_LOGI(UVC_STREAM_TAG, "Submitted JPEG frame (%zu bytes)", jpeg_len);
 
   // Signal that a frame is ready
   xSemaphoreGive(UVCStreamHelpers::frame_ready_sem);
