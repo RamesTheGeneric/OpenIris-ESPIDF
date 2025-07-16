@@ -78,7 +78,8 @@ void CameraManager::setupCameraPinout()
 
       // this causes problems
       .pixel_format = PIXFORMAT_JPEG,  // YUV422,GRAYSCALE,RGB565,JPEG
-      .frame_size = FRAMESIZE_QQVGA, // QQVGA-UXGA, For ESP32, do not use sizes above QVGA when not JPEG. The performance of the ESP32-S series has improved a lot, but JPEG mode always gives better frame rates.
+      //.frame_size = FRAMESIZE_HQVGA, // QQVGA-UXGA, For ESP32, do not use sizes above QVGA when not JPEG. The performance of the ESP32-S series has improved a lot, but JPEG mode always gives better frame rates.
+      .frame_size = FRAMESIZE_240X240,
 
       .jpeg_quality = 9,                   // 0-63, for OV series camera sensors, lower number means higher quality
       .fb_count = 2,                       // 3                    // When jpeg mode is used, if fb_count more than one, the driver will work in continuous mode.
@@ -115,9 +116,9 @@ void CameraManager::setupCameraSensor()
       0x00);                                            // banksel, here we're directly writing to the registers.
                                                         // 0xFF==0x00 is the first bank, there's also 0xFF==0x01
   camera_sensor->set_reg(camera_sensor, 0xd3, 0xff, 5); // clock
-  camera_sensor->set_brightness(camera_sensor, 2);      // -2 to 2
-  camera_sensor->set_contrast(camera_sensor, 2);        // -2 to 2
-  camera_sensor->set_saturation(camera_sensor, -2);     // -2 to 2
+  camera_sensor->set_brightness(camera_sensor, 0);      // -2 to 2
+  camera_sensor->set_contrast(camera_sensor, 0);        // -2 to 2
+  camera_sensor->set_saturation(camera_sensor, 0);     // -2 to 2
 
   // white balance control
   camera_sensor->set_whitebal(camera_sensor, 1); // 0 = disable , 1 = enable
@@ -128,13 +129,13 @@ void CameraManager::setupCameraSensor()
 
   // controls the exposure
   camera_sensor->set_exposure_ctrl(camera_sensor,
-                                   1);              // 0 = disable , 1 = enable
+                                   0);              // 0 = disable , 1 = enable
   camera_sensor->set_aec2(camera_sensor, 0);        // 0 = disable , 1 = enable
   camera_sensor->set_ae_level(camera_sensor, 0);    // -2 to 2
-  camera_sensor->set_aec_value(camera_sensor, 600); // 0 to 1200
+  camera_sensor->set_aec_value(camera_sensor, 200); // 0 to 1200
 
   // controls the gain
-  camera_sensor->set_gain_ctrl(camera_sensor, 1); // 0 = disable , 1 = enable
+  camera_sensor->set_gain_ctrl(camera_sensor, 0); // 0 = disable , 1 = enable
 
   // automatic gain control gain, controls by how much the resulting image
   // should be amplified
@@ -150,7 +151,7 @@ void CameraManager::setupCameraSensor()
   // gamma correction
   camera_sensor->set_raw_gma(
       camera_sensor,
-      1); // 0 = disable , 1 = enable (makes much lighter and noisy)
+      0); // 0 = disable , 1 = enable (makes much lighter and noisy)
 
   camera_sensor->set_lenc(camera_sensor, 0); // 0 = disable , 1 = enable // 0 =
                                              // disable , 1 = enable
@@ -163,7 +164,7 @@ void CameraManager::setupCameraSensor()
           // 4 - Green Tint, 5 - Blue Tint, 6 - Sepia)
 
   // it gets overriden somewhere somehow
-  camera_sensor->set_framesize(camera_sensor, FRAMESIZE_QQVGA);
+  camera_sensor->set_framesize(camera_sensor, FRAMESIZE_240X240);
   ESP_LOGI(CAMERA_MANAGER_TAG, "Setting up camera sensor done");
 }
 
