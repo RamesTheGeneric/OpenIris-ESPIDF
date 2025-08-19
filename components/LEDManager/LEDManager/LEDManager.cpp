@@ -80,9 +80,9 @@ void LEDManager::setup() {
 
 #ifdef CONFIG_SUPPORTS_EXTERNAL_LED_CONTROL
   ESP_LOGD(LED_MANAGER_TAG, "Setting up illuminator led.");
-  const int freq = 5000;
+  const int freq = 40000; // 40kHz frequency for the illuminator LED
   const auto resolution = LEDC_TIMER_8_BIT;
-  const int dutyCycle = 255;
+  const int dutyCycle = (int)255*0.2; // 40% duty cycle  
 
   ledc_timer_config_t ledc_timer = {
       .speed_mode = LEDC_LOW_SPEED_MODE,

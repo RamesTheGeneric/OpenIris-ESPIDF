@@ -34,75 +34,68 @@ void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
 {
     static uint8_t frame_id = 0;
     static uint16_t seq = 0;
-    size_t offset = 0;
-    uint8_t total_chunks = (len + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE;
-    printf("Sending frame %d with %d chunks (%d bytes total)\n", frame_id, total_chunks, len);
 
-    while (offset < len) {
-        size_t chunk_len = len - offset > MAX_PAYLOAD_SIZE ? MAX_PAYLOAD_SIZE : len - offset;
-        uint8_t buffer[1500] = {0}; 
+    // Repeat frame transmission 3 times
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        size_t offset = 0;
+        uint8_t total_chunks = (len + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE;
+        printf("Sending frame %d (attempt %d) with %d chunks (%d bytes total)\n",
+               frame_id, repeat + 1, total_chunks, len);
 
-        // 802.11 Data Frame header construction
-        wifi_ieee80211_data_hdr_t *hdr = (wifi_ieee80211_data_hdr_t *)buffer;
+        while (offset < len) {
+            size_t chunk_len = len - offset > MAX_PAYLOAD_SIZE ? MAX_PAYLOAD_SIZE : len - offset;
+            uint8_t buffer[1500] = {0}; 
 
-        // Frame Control for regular Data frame
-        hdr->frame_control[0] = 0x08;  // Data frame, To DS = 1 (changed from 0x88)
-        hdr->frame_control[1] = 0x00;  // No special flags
+            // 802.11 Data Frame header construction
+            wifi_ieee80211_data_hdr_t *hdr = (wifi_ieee80211_data_hdr_t *)buffer;
 
-        // Duration field - set to 0
-        hdr->duration[0] = 0x00;
-        hdr->duration[1] = 0x00;
+            hdr->frame_control[0] = 0x08;
+            hdr->frame_control[1] = 0x00;
 
-        // Address fields
-        memset(hdr->addr1, 0xFF, 6);                    // Destination: broadcast
-        esp_wifi_get_mac(WIFI_IF_STA, hdr->addr2);      // Source MAC
-        memcpy(hdr->addr3, hdr->addr2, 6);              // BSSID = Source MAC
+            hdr->duration[0] = 0x00;
+            hdr->duration[1] = 0x00;
 
-        // Sequence control
-        hdr->seq_ctrl[0] = (seq & 0x0F) << 4;
-        hdr->seq_ctrl[1] = (seq >> 4);
-        seq = (seq + 1) & 0x0FFF;
+            memset(hdr->addr1, 0xFF, 6);
+            esp_wifi_get_mac(WIFI_IF_STA, hdr->addr2);
+            memcpy(hdr->addr3, hdr->addr2, 6);
 
-        // LLC/SNAP header 
-        uint8_t *llc_snap = buffer + sizeof(wifi_ieee80211_data_hdr_t);
-        *llc_snap++ = 0xAA;  // DSAP
-        *llc_snap++ = 0xAA;  // SSAP
-        *llc_snap++ = 0x03;  // Control
-        *llc_snap++ = 0x00;  // OUI byte 1
-        *llc_snap++ = 0x00;  // OUI byte 2
-        *llc_snap++ = 0x00;  // OUI byte 3
-        *llc_snap++ = 0x88;  // EtherType high byte (custom)
-        *llc_snap++ = 0xB5;  // EtherType low byte (custom)
+            hdr->seq_ctrl[0] = (seq & 0x0F) << 4;
+            hdr->seq_ctrl[1] = (seq >> 4);
+            seq = (seq + 1) & 0x0FFF;
 
-        // Custom header for frame reconstruction
-        uint8_t *custom_hdr = llc_snap;
-        memcpy(custom_hdr, vendor_oui, 3);          // OUI for identification
-        custom_hdr += 3;
-        *custom_hdr++ = frame_id;                   // Frame ID
-        *custom_hdr++ = offset / MAX_PAYLOAD_SIZE;  // Chunk ID
-        *custom_hdr++ = total_chunks;               // Total chunks
+            uint8_t *llc_snap = buffer + sizeof(wifi_ieee80211_data_hdr_t);
+            *llc_snap++ = 0xAA;
+            *llc_snap++ = 0xAA;
+            *llc_snap++ = 0x03;
+            *llc_snap++ = 0x00;
+            *llc_snap++ = 0x00;
+            *llc_snap++ = 0x00;
+            *llc_snap++ = 0x88;
+            *llc_snap++ = 0xB5;
 
-        // Length field for this chunk
-        *custom_hdr++ = (chunk_len >> 8) & 0xFF;    // Length high byte
-        *custom_hdr++ = chunk_len & 0xFF;           // Length low byte
+            uint8_t *custom_hdr = llc_snap;
+            memcpy(custom_hdr, vendor_oui, 3);
+            custom_hdr += 3;
+            *custom_hdr++ = frame_id;
+            *custom_hdr++ = offset / MAX_PAYLOAD_SIZE;
+            *custom_hdr++ = total_chunks;
+            *custom_hdr++ = (chunk_len >> 8) & 0xFF;
+            *custom_hdr++ = chunk_len & 0xFF;
 
-        // Copy JPEG data
-        memcpy(custom_hdr, jpeg + offset, chunk_len);
-        custom_hdr += chunk_len;
+            memcpy(custom_hdr, jpeg + offset, chunk_len);
+            custom_hdr += chunk_len;
 
-        // No parity bit calculation
+            size_t frame_len = custom_hdr - buffer;
 
-        size_t frame_len = custom_hdr - buffer;
+            esp_err_t result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
+            if (result != ESP_OK) {
+                printf("TX failed: %s\n", esp_err_to_name(result));
+            }
 
-        // No FCS calculation, reduce the frame length accordingly
-        esp_err_t result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
-        if (result != ESP_OK) {
-            printf("TX failed: %s\n", esp_err_to_name(result));
+            offset += chunk_len;
         }
-
-        offset += chunk_len;
     }
-    printf("Sent Frame %d\n", frame_id);
 
+    printf("Sent Frame %d (3x)\n", frame_id);
     frame_id++;
 }

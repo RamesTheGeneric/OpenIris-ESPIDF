@@ -17,7 +17,7 @@ static esp_err_t UVCStreamHelpers::camera_start_cb(uvc_format_t format, int widt
   ESP_LOGI(UVC_STREAM_TAG, "Camera Start");
   ESP_LOGI(UVC_STREAM_TAG, "Format: %d, width: %d, height: %d, rate: %d", format, width, height, rate);
   #ifndef CONFIG_RX_MODE
-  framesize_t frame_size = FRAMESIZE_QQVGA;
+  framesize_t frame_size = FRAMESIZE_240X240;
   #endif
 
   if (format != UVC_FORMAT_JPEG)
@@ -29,7 +29,7 @@ static esp_err_t UVCStreamHelpers::camera_start_cb(uvc_format_t format, int widt
   if (width == frameWidth && height == frameHeight)
   {
     #ifndef CONFIG_RX_MODE
-    frame_size = FRAMESIZE_QQVGA;
+    frame_size = FRAMESIZE_240X240; // Default resolution for UVC Stream
     #endif
   }
   else
