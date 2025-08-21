@@ -138,8 +138,8 @@ void CameraManager::setupCameraSensor()
 
   // automatic gain control gain, controls by how much the resulting image
   // should be amplified
-  camera_sensor->set_agc_gain(camera_sensor, 2);                   // 0 to 30
-  camera_sensor->set_gainceiling(camera_sensor, (gainceiling_t)6); // 0 to 6
+  camera_sensor->set_agc_gain(camera_sensor, 0);                   // 0 to 30
+  camera_sensor->set_gainceiling(camera_sensor, (gainceiling_t)0); // 0 to 6
 
   // black and white pixel correction, averages the white and black spots
   camera_sensor->set_bpc(camera_sensor, 1); // 0 = disable , 1 = enable

@@ -220,6 +220,7 @@ extern "C" void app_main(void) {
 
     timerHandle = createStartVideoStreamingTimer(serialManagerHandle);
     if (timerHandle != nullptr) {
-        esp_timer_start_once(timerHandle, 30000000); // 30s
+        //esp_timer_start_once(timerHandle, 30000000); // 30s
+        esp_timer_start_once(timerHandle, 3000000); // 3s
     }
 }
