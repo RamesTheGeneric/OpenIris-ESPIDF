@@ -40,23 +40,20 @@ static const char *TAG = "s3 ll_cam";
 #include "driver/gptimer.h"
 #include "driver/gpio.h"
 
-#define STROBE_GPIO  1   // change this pin
+#define STROBE_GPIO  1   // attach this to sdkconfig entry
 
 static gptimer_handle_t strobe_timer = NULL;
 
-// Timer callback to turn strobe pin LOW after 500us
 static bool IRAM_ATTR strobe_timer_cb(gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata, void *user_ctx) {
-    gpio_set_level(STROBE_GPIO, 0);  // Turn strobe OFF
+    gpio_set_level(STROBE_GPIO, 0);  // cut strobe
     return false;
 }
 
 static void strobe_init(void)
 {
-    // Configure strobe pin as output, initially LOW
     gpio_set_direction(STROBE_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(STROBE_GPIO, 0);
     
-    // Configure timer for 500us pulse width
     gptimer_config_t config = {
         .clk_src = GPTIMER_CLK_SRC_DEFAULT,
         .direction = GPTIMER_COUNT_UP,
@@ -80,7 +77,8 @@ static inline void IRAM_ATTR strobe_fire(void)
         
         // Set timer to turn it OFF after 500us
         gptimer_alarm_config_t alarm_config = {
-            .alarm_count = 5500,  // 500 
+            .alarm_count = (int)15000*1,  // 100% // This number changes with xclk, Ex. 20000 = 100% dutycycle @20MHz
+                                          // I need to find a way to calculate this. 
             .flags.auto_reload_on_alarm = false,
         };
         gptimer_stop(strobe_timer);
