@@ -64,5 +64,7 @@
     },
     "idf.espIdfPathWin": "C:\\Users\\epicm\\esp\\v5.4.1\\esp-idf",
     "idf.toolsPathWin": "C:\\Users\\epicm\\.espressif",
-    "idf.pythonInstallPath": "C:\\Users\\epicm\\.espressif\\tools\\idf-python\\3.11.2\\python.exe"
+    "idf.pythonInstallPath": "C:\\Users\\epicm\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
+    "idf.currentSetup": "/Users/apple/.espressif/v5.5.4/esp-idf",
+    "idf.port": "/dev/tty.usbmodem2101"
 }
