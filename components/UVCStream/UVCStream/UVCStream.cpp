@@ -12,6 +12,7 @@ namespace UVCStreamHelpers
 static esp_err_t UVCStreamHelpers::camera_start_cb(uvc_format_t format, int width, int height, int rate, void *cb_ctx)
 {
   (void)cb_ctx;
+  ESP_LOGI(UVC_STREAM_TAG, "camera_start_cb CALLED: format=%d, width=%d, height=%d, rate=%d", format, width, height, rate);
   frameWidth = width;
   frameHeight = height;
   ESP_LOGI(UVC_STREAM_TAG, "Camera Start");
@@ -50,6 +51,7 @@ static esp_err_t UVCStreamHelpers::camera_start_cb(uvc_format_t format, int widt
 
 static void UVCStreamHelpers::camera_stop_cb(void *cb_ctx)
 {
+  ESP_LOGI(UVC_STREAM_TAG, "camera_stop_cb CALLED");
   (void)cb_ctx;
   #ifndef CONFIG_RX_MODE
   if (s_fb.cam_fb_p)
@@ -81,17 +83,23 @@ static uvc_fb_t *UVCStreamHelpers::camera_fb_get_cb(void *cb_ctx)
   s_fb.uvc_fb.format = UVC_FORMAT_JPEG; // we gotta make sure we're ALWAYS using JPEG
   s_fb.uvc_fb.timestamp = s_fb.cam_fb_p->timestamp;
   #else
-  if (xSemaphoreTake(frame_ready_sem, pdMS_TO_TICKS(100)) != pdTRUE)
+  if (xSemaphoreTake(frame_ready_sem, pdMS_TO_TICKS(50)) != pdTRUE)
   {
+    ESP_LOGW(UVC_STREAM_TAG, "FB_CB: semaphore timeout, no frame ready");
     return nullptr; // Timeout - no frame available
   }
   // Get Self Contained jpeg frame here
+  if (jpeg_s_fb.buf == nullptr || jpeg_s_fb.len == 0) {
+    ESP_LOGW(UVC_STREAM_TAG, "FB_CB: buffer null or zero length");
+    return nullptr;
+  }
   s_fb.uvc_fb.buf = jpeg_s_fb.buf;
   s_fb.uvc_fb.len = jpeg_s_fb.len;
   s_fb.uvc_fb.width = frameWidth;
   s_fb.uvc_fb.height = frameHeight;
   s_fb.uvc_fb.format = UVC_FORMAT_JPEG; // we gotta make sure we're ALWAYS using JPEG
   s_fb.uvc_fb.timestamp = static_cast<timeval>(esp_timer_get_time());
+  ESP_LOGI(UVC_STREAM_TAG, "FB_CB: frame captured %zu bytes, buf=%p", jpeg_s_fb.len, (void*)jpeg_s_fb.buf);
   #endif
 
   if (s_fb.uvc_fb.len > UVC_MAX_FRAMESIZE_SIZE)
@@ -119,14 +127,14 @@ esp_err_t UVCStreamManager::setup()
 {
   ESP_LOGI(UVC_STREAM_TAG, "Setting up UVC Stream");
 
-  #ifdef CONFIG_RX_MODE
-  UVCStreamHelpers::frame_ready_sem = xSemaphoreCreateBinary();
-  if (UVCStreamHelpers::frame_ready_sem == nullptr)
-  {
-    ESP_LOGE(UVC_STREAM_TAG, "Failed to create frame ready semaphore");
-    return ESP_FAIL;
-  }
-  #endif
+   #ifdef CONFIG_RX_MODE
+   UVCStreamHelpers::frame_ready_sem = xSemaphoreCreateCounting(255, 0);
+   if (UVCStreamHelpers::frame_ready_sem == nullptr)
+   {
+     ESP_LOGE(UVC_STREAM_TAG, "Failed to create frame ready semaphore");
+     return ESP_FAIL;
+   }
+   #endif
 
   uvc_buffer = static_cast<uint8_t *>(malloc(UVC_MAX_FRAMESIZE_SIZE));
   if (uvc_buffer == nullptr)
@@ -173,15 +181,7 @@ void UVCStreamManager::provide_jpeg_frame(uint8_t *jpeg_data, size_t jpeg_len)
     return;
   }
 
-  // Free any previously allocated buffer
-  if (UVCStreamHelpers::jpeg_s_fb.buf != nullptr)
-  {
-    free(UVCStreamHelpers::jpeg_s_fb.buf);
-    UVCStreamHelpers::jpeg_s_fb.buf = nullptr;
-    UVCStreamHelpers::jpeg_s_fb.len = 0;
-  }
-
-  // Allocate and copy JPEG data into a new buffer
+  // Allocate and copy JPEG data into a new buffer BEFORE updating shared state
   uint8_t *new_buf = (uint8_t *)malloc(jpeg_len);
   if (!new_buf)
   {
@@ -190,11 +190,18 @@ void UVCStreamManager::provide_jpeg_frame(uint8_t *jpeg_data, size_t jpeg_len)
   }
   memcpy(new_buf, jpeg_data, jpeg_len);
 
-  // Store in shared buffer struct
+  // Free any previously allocated buffer and update shared state atomically
+  if (UVCStreamHelpers::jpeg_s_fb.buf != nullptr)
+  {
+    free(UVCStreamHelpers::jpeg_s_fb.buf);
+  }
   UVCStreamHelpers::jpeg_s_fb.buf = new_buf;
   UVCStreamHelpers::jpeg_s_fb.len = jpeg_len;
 
   ESP_LOGI(UVC_STREAM_TAG, "Submitted JPEG frame (%zu bytes)", jpeg_len);
+  ESP_LOGI(UVC_STREAM_TAG, "JPEG sanity: SOI=0x%02X%02X EOI=0x%02X%02X",
+           new_buf[0], new_buf[1],
+           new_buf[jpeg_len - 2], new_buf[jpeg_len - 1]);
 
   // Signal that a frame is ready
   xSemaphoreGive(UVCStreamHelpers::frame_ready_sem);

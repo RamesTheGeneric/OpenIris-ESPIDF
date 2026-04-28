@@ -228,15 +228,16 @@ extern "C" void app_main(void)
         1, // we only rely on the serial manager during provisioning, we can run it slower
         serialManagerHandle);
 
-    wifiManager.Begin();
-    mdnsManager.start();
-    restAPI->begin();
     #ifdef CONFIG_RX_MODE
     wifiManager.setJpegFrameCallback([&](uint8_t* frameBuffer, uint16_t length) {
         uvcStream.provide_jpeg_frame(frameBuffer, length);
     });
     ESP_LOGI("[MAIN]", "Set WiFi Manger jpeg callback");
-    #else
+    #endif
+    wifiManager.Begin();
+    mdnsManager.start();
+    restAPI->begin();
+    #ifndef CONFIG_RX_MODE
     cameraHandler->setupCamera();
     #endif
 

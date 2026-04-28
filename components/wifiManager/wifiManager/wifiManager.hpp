@@ -43,12 +43,14 @@ typedef struct __attribute__((packed)) {
     uint16_t ethertype;     // Custom protocol identifier
 } llc_snap_hdr_t;
 
-// Custom protocol header for frame reconstruction
+// Custom protocol header for frame reconstruction (11 bytes total)
 typedef struct __attribute__((packed)) {
     uint8_t  vendor_oui[3]; // Vendor OUI for identification
     uint8_t  frame_id;      // Frame identifier
-    uint8_t  chunk_id;      // Chunk number
-    uint8_t  total_chunks;  // Total chunks in frame
+    uint8_t  rs_block_id;   // Which RS block this chunk belongs to
+    uint8_t  chunk_id;      // Chunk index within RS block (0-11)
+    uint8_t  total_chunks;  // Total chunks in RS block (always 12)
+    uint8_t  chunk_type;    // 0 = data chunk, 1 = parity chunk
     uint16_t chunk_len;     // Length of this chunk
 } custom_rx_hdr_t;
 

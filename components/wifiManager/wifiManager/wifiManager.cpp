@@ -1,4 +1,6 @@
 #include "wifiManager.hpp"
+#include "rs.hpp"
+#include <new>
 
 static auto WIFI_MANAGER_TAG = "[WIFI_MANAGER]";
 
@@ -6,12 +8,18 @@ static auto WIFI_MANAGER_TAG = "[WIFI_MANAGER]";
 #define MAX_CHUNKS 512
 #define VENDOR_OUI          {0xAC,0xDE,0x47}
 static const uint8_t vendor_oui[3] = VENDOR_OUI;
-#define MAX_PAYLOAD_SIZE 1400  
-#define MAX_FRAME_SIZE (50*1024)  
+#define MAX_PAYLOAD_SIZE 1400
+#define MAX_FRAME_SIZE (50*1024)
 #define UART_PORT UART_NUM_0
 
 // Custom EtherType
 #define CUSTOM_ETHERTYPE 0x88B5
+
+// RS(8,4) FEC parameters (must match TXStream)
+#define FEC_RS_DATA_CHUNKS   8
+#define FEC_RS_PARITY_CHUNKS 4
+#define FEC_RS_TOTAL_CHUNKS  12
+#define FEC_MAX_RS_BLOCKS    4
 
 static uint8_t frame_buf[MAX_FRAME_SIZE];
 static uint8_t current_frame_id = 0xFF;
@@ -19,6 +27,15 @@ static uint8_t expected_chunks = 0;
 static uint8_t received_chunks = 0;
 static uint8_t chunk_map[MAX_CHUNKS / 8];
 static uint32_t frame_start_time = 0;
+
+// Per-RS-block decode state
+static uint8_t rs_block_received[FEC_MAX_RS_BLOCKS][FEC_RS_TOTAL_CHUNKS];
+static uint8_t rs_block_count = 0;
+static uint8_t frame_decoded = 0;  // Flag to prevent repeated decode of same frame
+
+// Decode task: semaphore + handle
+static SemaphoreHandle_t rs_decode_semaphore = nullptr;
+static TaskHandle_t rs_decode_task_handle = nullptr;
 
 static JpegFrameCallback g_jpegFrameCallback = nullptr;
 
@@ -180,9 +197,112 @@ void WiFiManager::SetupAccessPoint()
   ESP_LOGI(WIFI_MANAGER_TAG, "AP started.");
 }
 
-static inline bool all_chunks_received(uint8_t total_chunks) {
-    for (int i = 0; i < total_chunks; ++i) {
-        if (!(chunk_map[i / 8] & (1 << (i % 8)))) return false;
+// ---------------------------------------------------------------------------
+// RS(8,4) decode a single RS block at the byte-position level.
+//
+// For each of the 1400 byte positions, collect available symbols from all
+// received chunks (data + parity) and RS-decode to recover the 8 data bytes.
+// If all 8 data chunks are present, copy directly without decode.
+// ---------------------------------------------------------------------------
+static bool rs_decode_block(uint8_t blockId, uint8_t* out, size_t* outLen)
+{
+    // Count how many data and parity chunks are present
+    uint8_t dataPresent = 0;
+    uint8_t parityPresent = 0;
+    for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
+        if (rs_block_received[blockId][c]) dataPresent++;
+    }
+    for (uint8_t p = 0; p < FEC_RS_PARITY_CHUNKS; p++) {
+        if (rs_block_received[blockId][FEC_RS_DATA_CHUNKS + p]) parityPresent++;
+    }
+
+    // If all 8 data chunks are present, copy directly
+    if (dataPresent >= FEC_RS_DATA_CHUNKS) {
+        memcpy(out, frame_buf + blockId * FEC_RS_TOTAL_CHUNKS * MAX_PAYLOAD_SIZE,
+               FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE);
+        *outLen = FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE;
+        return true;
+    }
+
+    // Need RS decode. Check we have enough parity to recover missing data.
+    // RS(8,4) can correct up to 4 erasures. Missing data chunks = erasures.
+    uint8_t missingData = FEC_RS_DATA_CHUNKS - dataPresent;
+    if (missingData > parityPresent) {
+        return false;
+    }
+
+    // RS(8,4) decode at each byte position
+    // Only pass DATA erasure positions to the RS library (0..7).
+    // Parity erasures are handled by the parityPresent check above.
+    RS::ReedSolomon<FEC_RS_DATA_CHUNKS, FEC_RS_PARITY_CHUNKS> rs;
+    uint8_t baseOffset = blockId * FEC_RS_TOTAL_CHUNKS * MAX_PAYLOAD_SIZE;
+
+    for (uint16_t i = 0; i < MAX_PAYLOAD_SIZE; i++) {
+        // Yield periodically to prevent task watchdog timeout
+        if (i % 256 == 0 && i != 0) taskYIELD();
+
+        // Build data buffer (8 bytes, one from each data chunk at position i)
+        uint8_t dataBytes[FEC_RS_DATA_CHUNKS];
+        // Build ECC buffer (4 bytes, one from each parity chunk at position i)
+        uint8_t eccBytes[FEC_RS_PARITY_CHUNKS];
+        // Build erasure list (only data positions 0..7)
+        uint8_t erasePos[FEC_RS_DATA_CHUNKS];
+        uint16_t eraseCount = 0;
+
+        for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
+            if (rs_block_received[blockId][c]) {
+                dataBytes[c] = frame_buf[baseOffset + c * MAX_PAYLOAD_SIZE + i];
+            } else {
+                dataBytes[c] = 0;
+                erasePos[eraseCount++] = c;
+            }
+        }
+
+        for (uint8_t p = 0; p < FEC_RS_PARITY_CHUNKS; p++) {
+            uint8_t parityIdx = FEC_RS_DATA_CHUNKS + p;
+            if (rs_block_received[blockId][parityIdx]) {
+                eccBytes[p] = frame_buf[baseOffset + parityIdx * MAX_PAYLOAD_SIZE + i];
+            } else {
+                eccBytes[p] = 0;
+            }
+        }
+
+        // Decode using DecodeBlock: separate data and ECC buffers
+        uint8_t decoded[FEC_RS_DATA_CHUNKS];
+        if (eraseCount > 0) {
+            int err = rs.DecodeBlock(dataBytes, eccBytes, decoded, erasePos, eraseCount);
+            if (err != 0) {
+                return false;
+            }
+        } else {
+            memcpy(decoded, dataBytes, FEC_RS_DATA_CHUNKS);
+        }
+
+        // Write decoded bytes to output (one byte per data chunk at position i)
+        for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
+            out[c * MAX_PAYLOAD_SIZE + i] = decoded[c];
+        }
+    }
+
+    *outLen = FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE;
+    return true;
+}
+
+// Check if enough chunks have been received in an RS block for decode
+static inline bool rs_block_decodable(uint8_t blockId)
+{
+    uint8_t count = 0;
+    for (uint8_t c = 0; c < FEC_RS_TOTAL_CHUNKS; c++) {
+        if (rs_block_received[blockId][c]) count++;
+    }
+    return count >= FEC_RS_DATA_CHUNKS;
+}
+
+// Check if all RS blocks for the current frame are decodable
+static inline bool all_rs_blocks_decodable()
+{
+    for (uint8_t b = 0; b < rs_block_count; b++) {
+        if (!rs_block_decodable(b)) return false;
     }
     return true;
 }
@@ -191,117 +311,143 @@ void WiFiManager::setJpegFrameCallback(JpegFrameCallback callback) {
     g_jpegFrameCallback = callback;
 }
 
-// Updated sniffer callback for data packets
-// Updated sniffer callback for data packets
+// ---------------------------------------------------------------------------
+// RS decode task: runs on dedicated core, offloaded from WiFi task.
+// Waits on semaphore, decodes frame, calls JPEG callback.
+// ---------------------------------------------------------------------------
+static void rs_decode_task_fn(void* arg)
+{
+    while (true) {
+        if (xSemaphoreTake(rs_decode_semaphore, portMAX_DELAY) != pdTRUE) continue;
+
+        uint8_t* decoded = new (std::nothrow) uint8_t[FEC_MAX_RS_BLOCKS * FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE];
+        if (!decoded) continue;
+        memset(decoded, 0, FEC_MAX_RS_BLOCKS * FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE);
+
+        size_t totalDecodedLen = 0;
+        bool decodeOk = true;
+
+        for (uint8_t b = 0; b < rs_block_count; b++) {
+            size_t blockLen = 0;
+            if (!rs_decode_block(b, decoded + totalDecodedLen, &blockLen)) {
+                decodeOk = false;
+                break;
+            }
+            totalDecodedLen += blockLen;
+        }
+
+        if (decodeOk) {
+            // Find JPEG end marker
+            size_t total_length = 0;
+            for (size_t i = totalDecodedLen - 1; i >= 1; i--) {
+                if (decoded[i-1] == 0xFF && decoded[i] == 0xD9) {
+                    total_length = i + 1;
+                    break;
+                }
+            }
+            if (total_length == 0) total_length = totalDecodedLen;
+
+            ESP_LOGI(WIFI_MANAGER_TAG, "RS decode OK: %zu bytes, JPEG end at %zu, blocks=%d",
+                     totalDecodedLen, total_length, rs_block_count);
+            ESP_LOGI(WIFI_MANAGER_TAG, "JPEG header: 0x%02X%02X%02X%02X",
+                     decoded[0], decoded[1], decoded[2], decoded[3]);
+
+            if (g_jpegFrameCallback) {
+                g_jpegFrameCallback(decoded, total_length);
+            }
+        } else {
+            ESP_LOGW(WIFI_MANAGER_TAG, "RS decode FAILED: blocks=%d", rs_block_count);
+        }
+
+        delete[] decoded;
+    }
+}
+
+// Updated sniffer callback for data packets with RS(8,4) FEC
 static void sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t t)
 {
     const wifi_promiscuous_pkt_t *ppkt = (wifi_promiscuous_pkt_t *)buf;
     const uint8_t *payload = ppkt->payload;
-    
+
     // Check if it's a regular data frame (frame control = 0x08, not 0x88)
     if ((payload[0] & 0xFC) != 0x08) return;
-    
+
     // Skip to LLC/SNAP header (after 802.11 header)
     const uint8_t *llc_snap = payload + 24;
-    
+
     // Verify LLC/SNAP header for our custom protocol
     if (llc_snap[0] != 0xAA || llc_snap[1] != 0xAA || llc_snap[2] != 0x03) return;
     if (llc_snap[3] != 0x00 || llc_snap[4] != 0x00 || llc_snap[5] != 0x00) return;
-    
+
     // Check our custom EtherType
     uint16_t ethertype = (llc_snap[6] << 8) | llc_snap[7];
     if (ethertype != CUSTOM_ETHERTYPE) return;
-    
-    // Parse our custom header
+
+    // Parse our custom header (11 bytes with FEC fields)
     const uint8_t *custom_hdr = llc_snap + 8;
-    
+
     // Verify OUI
     if (memcmp(custom_hdr, vendor_oui, 3) != 0) return;
-    
+
     uint8_t frame_id = custom_hdr[3];
-    uint8_t chunk_id = custom_hdr[4];
-    uint8_t total_chunks = custom_hdr[5];
-    uint16_t chunk_len = (custom_hdr[6] << 8) | custom_hdr[7];
-    
-    const uint8_t *jpeg_data = custom_hdr + 8;
-    
+    uint8_t rs_block_id = custom_hdr[4];
+    uint8_t chunk_id = custom_hdr[5];
+    uint8_t total_chunks = custom_hdr[6];
+    uint8_t chunk_type = custom_hdr[7]; (void)chunk_type;
+    uint16_t chunk_len = (custom_hdr[8] << 8) | custom_hdr[9];
+
+    const uint8_t *jpeg_data = custom_hdr + 10;
+
     // Validate chunk length
-    int max_possible_len = ppkt->rx_ctrl.sig_len - (jpeg_data - payload) - 4; // -4 for FCS
+    int max_possible_len = ppkt->rx_ctrl.sig_len - (jpeg_data - payload);
     if (chunk_len > max_possible_len || chunk_len > MAX_PAYLOAD_SIZE) {
-        printf("Invalid chunk length: %d (max: %d)\n", chunk_len, max_possible_len);
         return;
     }
-    
+
+    // Validate RS block ID
+    if (rs_block_id >= FEC_MAX_RS_BLOCKS) {
+        return;
+    }
+
     // Handle new frame
     if (frame_id != current_frame_id) {
-        if (current_frame_id != 0xFF) {
-            printf("Frame %d incomplete (%d/%d chunks), starting frame %d\n", 
-                   current_frame_id, received_chunks, expected_chunks, frame_id);
-        }
         current_frame_id = frame_id;
         expected_chunks = total_chunks;
         received_chunks = 0;
+        rs_block_count = 0;
+        frame_decoded = 0;
         memset(frame_buf, 0, sizeof(frame_buf));
         memset(chunk_map, 0, sizeof(chunk_map));
+        memset(rs_block_received, 0, sizeof(rs_block_received));
         frame_start_time = esp_timer_get_time() / 1000; // ms
     }
-    
+
     // Process chunk
-    if (chunk_id < expected_chunks && chunk_id < MAX_CHUNKS) {
-        if (!(chunk_map[chunk_id / 8] & (1 << (chunk_id % 8)))) {
-            chunk_map[chunk_id / 8] |= (1 << (chunk_id % 8));
-            
-            // Calculate offset
-            size_t offset = chunk_id * MAX_PAYLOAD_SIZE;
+    if (chunk_id < FEC_RS_TOTAL_CHUNKS) {
+        if (!rs_block_received[rs_block_id][chunk_id]) {
+            rs_block_received[rs_block_id][chunk_id] = 1;
+
+            // Calculate offset in frame buffer
+            size_t offset = (rs_block_id * FEC_RS_TOTAL_CHUNKS + chunk_id) * MAX_PAYLOAD_SIZE;
             if (offset + chunk_len <= MAX_FRAME_SIZE) {
                 memcpy(frame_buf + offset, jpeg_data, chunk_len);
                 received_chunks++;
-                
-                // Debug output for high chunk counts
-                if (received_chunks % 10 == 0) {
-                    printf("Received %d/%d chunks for frame %d\n", 
-                           received_chunks, expected_chunks, frame_id);
-                }
+
+                // Track RS block count
+                if (rs_block_id + 1 > rs_block_count)
+                    rs_block_count = rs_block_id + 1;
             } else {
-                printf("Frame buffer overflow prevented (offset: %zu, len: %d)\n", offset, chunk_len);
+                // Frame buffer overflow prevented - silent fail
             }
         }
     }
-    
-    // Check if frame is complete
-    if (received_chunks == expected_chunks && all_chunks_received(expected_chunks)) {
-        // Calculate actual frame size by finding JPEG end marker
-        size_t total_length = 0;
-        for (int i = expected_chunks - 1; i >= 0; i--) {
-            size_t chunk_start = i * MAX_PAYLOAD_SIZE;
-            size_t chunk_end = chunk_start + MAX_PAYLOAD_SIZE;
-            if (chunk_end > MAX_FRAME_SIZE) chunk_end = MAX_FRAME_SIZE;
-            
-            // Look for JPEG end marker (0xFFD9) in reverse
-            for (size_t j = chunk_end - 1; j >= chunk_start && j >= 1; j--) {
-                if (frame_buf[j-1] == 0xFF && frame_buf[j] == 0xD9) {
-                    total_length = j + 1;
-                    break;
-                }
-            }
-            if (total_length > 0) break;
-        }
-        
-        if (total_length == 0) {
-            total_length = expected_chunks * MAX_PAYLOAD_SIZE;
-        }
-        
-        uint32_t frame_time = (esp_timer_get_time() / 1000) - frame_start_time;
-        printf("Complete JPEG frame %d: %d chunks, %zu bytes, %lu ms\n", 
-               frame_id, expected_chunks, total_length, frame_time);
-        
-        // Call the callback
-        if (g_jpegFrameCallback) {
-            g_jpegFrameCallback(frame_buf, total_length);
-        }
-        
-        // Reset for next frame - don't reset to 0xFF, keep the current frame_id
-        // This way we can properly track the next frame transition
+
+    // Signal decode task when frame is ready (only once per frame)
+    if (!frame_decoded && all_rs_blocks_decodable()) {
+        frame_decoded = 1;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xSemaphoreGiveFromISR(rs_decode_semaphore, &xHigherPriorityTaskWoken);
+        if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
 }
 
@@ -334,6 +480,11 @@ void WiFiManager::Begin()
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&filter));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(sniffer_cb));
     esp_wifi_set_promiscuous(true);
+
+    // Create RS decode task (offloaded from WiFi task to prevent heap corruption)
+    rs_decode_semaphore = xSemaphoreCreateBinary();
+    xTaskCreatePinnedToCore(rs_decode_task_fn, "rs_decode", 4096, nullptr, 5, &rs_decode_task_handle, 1);
+
     ESP_LOGI(WIFI_MANAGER_TAG, "RX started on channel %d", CONFIG_WIFI_CHANNEL);
   #endif
     

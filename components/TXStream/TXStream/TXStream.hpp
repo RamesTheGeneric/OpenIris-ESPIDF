@@ -7,17 +7,29 @@
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_err.h"
+#include "rs.hpp"
 #include <stdio.h>
 #include <cstring>
 
 #ifndef MAX_PAYLOAD_SIZE
-#define MAX_PAYLOAD_SIZE 1400  // Increased from 200 to 1400
+#define MAX_PAYLOAD_SIZE 1400
 #endif
 
 // 802.11 Frame Control for data frames
 #ifndef FRAME_CONTROL_DATA
-#define FRAME_CONTROL_DATA 0x08  // Changed from 0x88 to 0x08
+#define FRAME_CONTROL_DATA 0x08
 #endif
+
+// RS(8,4) FEC parameters
+// At each byte position, 8 data bytes are RS-encoded into 4 parity bytes.
+// Up to 4 chunks per RS block can be lost and still recovered.
+#define FEC_RS_DATA_CHUNKS   8
+#define FEC_RS_PARITY_CHUNKS 4
+#define FEC_RS_TOTAL_CHUNKS  12
+
+// Maximum RS blocks per frame (4 RS blocks = ~45KB max JPEG)
+#define FEC_MAX_RS_BLOCKS    4
+
 static const uint8_t vendor_oui[3] = {0xAC,0xDE,0x47}; //Right = {0xAC,0xDE,0x48}  ||  Left == {0xAC,0xDE,0x47}
 
 class TXStream {
@@ -53,12 +65,14 @@ private:
         uint8_t  seq_ctrl[2];
     } wifi_ieee80211_data_hdr_t;
 
-    // Custom protocol header embedded in data payload
+    // Custom protocol header embedded in data payload (11 bytes total)
     typedef struct __attribute__((packed)) {
         uint8_t  oui[3];        // Vendor OUI
         uint8_t  frame_id;      // Frame identifier
-        uint8_t  chunk_id;      // Chunk number
-        uint8_t  total_chunks;  // Total chunks in frame
+        uint8_t  rs_block_id;   // Which RS block this chunk belongs to
+        uint8_t  chunk_id;      // Chunk index within the RS block (0-11)
+        uint8_t  total_chunks;  // Total chunks in this RS block (always 12)
+        uint8_t  chunk_type;    // 0 = data chunk, 1 = parity chunk
         uint16_t chunk_len;     // Length of this chunk
     } custom_data_hdr_t;
 
