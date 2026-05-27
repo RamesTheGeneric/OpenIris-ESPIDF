@@ -20,12 +20,12 @@
 #define FRAME_CONTROL_DATA 0x08
 #endif
 
-// RS(8,4) FEC parameters
-// At each byte position, 8 data bytes are RS-encoded into 4 parity bytes.
-// Up to 4 chunks per RS block can be lost and still recovered.
-#define FEC_RS_DATA_CHUNKS   8
+// RS(4,4) FEC parameters
+// At each byte position, 4 data bytes are RS-encoded into 4 parity bytes.
+// Up to 4 chunks per RS block can be lost and still recovered (50% tolerance).
+#define FEC_RS_DATA_CHUNKS   4
 #define FEC_RS_PARITY_CHUNKS 4
-#define FEC_RS_TOTAL_CHUNKS  12
+#define FEC_RS_TOTAL_CHUNKS  8
 
 // Maximum RS blocks per frame (4 RS blocks = ~45KB max JPEG)
 #define FEC_MAX_RS_BLOCKS    4

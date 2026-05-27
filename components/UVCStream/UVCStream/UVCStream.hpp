@@ -42,6 +42,7 @@ namespace UVCStreamHelpers
   static jpeg_fb_t jpeg_s_fb;
   static bool stream_active;
   static SemaphoreHandle_t frame_ready_sem;
+  static uint8_t uvc_frame_buf[75 * 1024];
   #endif
 
   static esp_err_t camera_start_cb(uvc_format_t format, int width, int height, int rate, void *cb_ctx);

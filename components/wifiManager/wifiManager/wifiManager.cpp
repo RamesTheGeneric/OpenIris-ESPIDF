@@ -1,4 +1,5 @@
 #include "wifiManager.hpp"
+#define RS_NO_ASSERT
 #include "rs.hpp"
 #include <new>
 
@@ -15,10 +16,10 @@ static const uint8_t vendor_oui[3] = VENDOR_OUI;
 // Custom EtherType
 #define CUSTOM_ETHERTYPE 0x88B5
 
-// RS(8,4) FEC parameters (must match TXStream)
-#define FEC_RS_DATA_CHUNKS   8
+// RS(4,4) FEC parameters (must match TXStream)
+#define FEC_RS_DATA_CHUNKS   4
 #define FEC_RS_PARITY_CHUNKS 4
-#define FEC_RS_TOTAL_CHUNKS  12
+#define FEC_RS_TOTAL_CHUNKS  8
 #define FEC_MAX_RS_BLOCKS    4
 
 static uint8_t frame_buf[MAX_FRAME_SIZE];
@@ -32,6 +33,14 @@ static uint32_t frame_start_time = 0;
 static uint8_t rs_block_received[FEC_MAX_RS_BLOCKS][FEC_RS_TOTAL_CHUNKS];
 static uint8_t rs_block_count = 0;
 static uint8_t frame_decoded = 0;  // Flag to prevent repeated decode of same frame
+
+// Decode snapshot buffers (protect against next frame overwriting during decode)
+// The sniffer snapshots frame_buf + rs_block_received here before signaling decode.
+// The decode task copies from these under mutex, so the sniffer can move on to the next frame.
+static uint8_t decode_buf[MAX_FRAME_SIZE];
+static uint8_t decode_rs_block_received[FEC_MAX_RS_BLOCKS][FEC_RS_TOTAL_CHUNKS];
+static uint8_t decode_rs_block_count;
+static SemaphoreHandle_t decode_mutex = NULL;
 
 // Decode task: semaphore + handle
 static SemaphoreHandle_t rs_decode_semaphore = nullptr;
@@ -203,23 +212,30 @@ void WiFiManager::SetupAccessPoint()
 // For each of the 1400 byte positions, collect available symbols from all
 // received chunks (data + parity) and RS-decode to recover the 8 data bytes.
 // If all 8 data chunks are present, copy directly without decode.
+//
+// block_data:    pointer to the interleaved chunk data for this block
+//                (FEC_RS_TOTAL_CHUNKS * MAX_PAYLOAD_SIZE bytes)
+// block_received: 12-byte presence flags for this block's chunks
 // ---------------------------------------------------------------------------
-static bool rs_decode_block(uint8_t blockId, uint8_t* out, size_t* outLen)
+static bool rs_decode_block(
+    const uint8_t* block_data,
+    const uint8_t* block_received,
+    uint8_t* out,
+    size_t* outLen)
 {
     // Count how many data and parity chunks are present
     uint8_t dataPresent = 0;
     uint8_t parityPresent = 0;
     for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
-        if (rs_block_received[blockId][c]) dataPresent++;
+        if (block_received[c]) dataPresent++;
     }
     for (uint8_t p = 0; p < FEC_RS_PARITY_CHUNKS; p++) {
-        if (rs_block_received[blockId][FEC_RS_DATA_CHUNKS + p]) parityPresent++;
+        if (block_received[FEC_RS_DATA_CHUNKS + p]) parityPresent++;
     }
 
     // If all 8 data chunks are present, copy directly
     if (dataPresent >= FEC_RS_DATA_CHUNKS) {
-        memcpy(out, frame_buf + blockId * FEC_RS_TOTAL_CHUNKS * MAX_PAYLOAD_SIZE,
-               FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE);
+        memcpy(out, block_data, FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE);
         *outLen = FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE;
         return true;
     }
@@ -235,7 +251,6 @@ static bool rs_decode_block(uint8_t blockId, uint8_t* out, size_t* outLen)
     // Only pass DATA erasure positions to the RS library (0..7).
     // Parity erasures are handled by the parityPresent check above.
     RS::ReedSolomon<FEC_RS_DATA_CHUNKS, FEC_RS_PARITY_CHUNKS> rs;
-    uint8_t baseOffset = blockId * FEC_RS_TOTAL_CHUNKS * MAX_PAYLOAD_SIZE;
 
     for (uint16_t i = 0; i < MAX_PAYLOAD_SIZE; i++) {
         // Yield periodically to prevent task watchdog timeout
@@ -250,8 +265,8 @@ static bool rs_decode_block(uint8_t blockId, uint8_t* out, size_t* outLen)
         uint16_t eraseCount = 0;
 
         for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
-            if (rs_block_received[blockId][c]) {
-                dataBytes[c] = frame_buf[baseOffset + c * MAX_PAYLOAD_SIZE + i];
+            if (block_received[c]) {
+                dataBytes[c] = block_data[c * MAX_PAYLOAD_SIZE + i];
             } else {
                 dataBytes[c] = 0;
                 erasePos[eraseCount++] = c;
@@ -260,8 +275,8 @@ static bool rs_decode_block(uint8_t blockId, uint8_t* out, size_t* outLen)
 
         for (uint8_t p = 0; p < FEC_RS_PARITY_CHUNKS; p++) {
             uint8_t parityIdx = FEC_RS_DATA_CHUNKS + p;
-            if (rs_block_received[blockId][parityIdx]) {
-                eccBytes[p] = frame_buf[baseOffset + parityIdx * MAX_PAYLOAD_SIZE + i];
+            if (block_received[parityIdx]) {
+                eccBytes[p] = block_data[parityIdx * MAX_PAYLOAD_SIZE + i];
             } else {
                 eccBytes[p] = 0;
             }
@@ -313,12 +328,29 @@ void WiFiManager::setJpegFrameCallback(JpegFrameCallback callback) {
 
 // ---------------------------------------------------------------------------
 // RS decode task: runs on dedicated core, offloaded from WiFi task.
-// Waits on semaphore, decodes frame, calls JPEG callback.
+// Waits on semaphore, copies snapshot from decode_buf under mutex,
+// decodes frame, calls JPEG callback.
 // ---------------------------------------------------------------------------
 static void rs_decode_task_fn(void* arg)
 {
+    // Pre-allocate local buffer on heap (45KB can't live on 4KB stack)
+    uint8_t* local_frame_buf = new (std::nothrow) uint8_t[MAX_FRAME_SIZE];
+    uint8_t local_rs_block_received[FEC_MAX_RS_BLOCKS][FEC_RS_TOTAL_CHUNKS];
+    if (!local_frame_buf) {
+        ESP_LOGE(WIFI_MANAGER_TAG, "Failed to allocate decode local buffer");
+        return;
+    }
+
     while (true) {
         if (xSemaphoreTake(rs_decode_semaphore, portMAX_DELAY) != pdTRUE) continue;
+
+        // Copy snapshot from decode_buf under mutex protection
+        // This prevents the sniffer from writing decode_buf while we read it.
+        xSemaphoreTake(decode_mutex, portMAX_DELAY);
+        memcpy(local_frame_buf, decode_buf, MAX_FRAME_SIZE);
+        memcpy(local_rs_block_received, decode_rs_block_received, sizeof(local_rs_block_received));
+        uint8_t block_count = decode_rs_block_count;
+        xSemaphoreGive(decode_mutex);
 
         uint8_t* decoded = new (std::nothrow) uint8_t[FEC_MAX_RS_BLOCKS * FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE];
         if (!decoded) continue;
@@ -327,9 +359,10 @@ static void rs_decode_task_fn(void* arg)
         size_t totalDecodedLen = 0;
         bool decodeOk = true;
 
-        for (uint8_t b = 0; b < rs_block_count; b++) {
+        for (uint8_t b = 0; b < block_count; b++) {
             size_t blockLen = 0;
-            if (!rs_decode_block(b, decoded + totalDecodedLen, &blockLen)) {
+            const uint8_t* block_data = local_frame_buf + b * FEC_RS_TOTAL_CHUNKS * MAX_PAYLOAD_SIZE;
+            if (!rs_decode_block(block_data, local_rs_block_received[b], decoded + totalDecodedLen, &blockLen)) {
                 decodeOk = false;
                 break;
             }
@@ -348,7 +381,7 @@ static void rs_decode_task_fn(void* arg)
             if (total_length == 0) total_length = totalDecodedLen;
 
             ESP_LOGI(WIFI_MANAGER_TAG, "RS decode OK: %zu bytes, JPEG end at %zu, blocks=%d",
-                     totalDecodedLen, total_length, rs_block_count);
+                     totalDecodedLen, total_length, block_count);
             ESP_LOGI(WIFI_MANAGER_TAG, "JPEG header: 0x%02X%02X%02X%02X",
                      decoded[0], decoded[1], decoded[2], decoded[3]);
 
@@ -356,7 +389,7 @@ static void rs_decode_task_fn(void* arg)
                 g_jpegFrameCallback(decoded, total_length);
             }
         } else {
-            ESP_LOGW(WIFI_MANAGER_TAG, "RS decode FAILED: blocks=%d", rs_block_count);
+            ESP_LOGW(WIFI_MANAGER_TAG, "RS decode FAILED: blocks=%d", block_count);
         }
 
         delete[] decoded;
@@ -422,6 +455,23 @@ static void sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t t)
         frame_start_time = esp_timer_get_time() / 1000; // ms
     }
 
+    // Frame timeout: if no new chunk arrives within 120ms, give up and reset
+    // This prevents getting stuck on incomplete frames during interference
+    {
+        int32_t elapsed = esp_timer_get_time() / 1000 - frame_start_time;
+        if (elapsed > 120) {
+            ESP_LOGW(WIFI_MANAGER_TAG, "Frame %d timeout after %ld ms (received %d chunks)",
+                     current_frame_id, (long)elapsed, received_chunks);
+            current_frame_id = 0xFF;
+            frame_decoded = 0;
+            rs_block_count = 0;
+            received_chunks = 0;
+            memset(rs_block_received, 0, sizeof(rs_block_received));
+            // Update start time so this chunk is treated as the start of a fresh attempt
+            frame_start_time = esp_timer_get_time() / 1000;
+        }
+    }
+
     // Process chunk
     if (chunk_id < FEC_RS_TOTAL_CHUNKS) {
         if (!rs_block_received[rs_block_id][chunk_id]) {
@@ -445,6 +495,17 @@ static void sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t t)
     // Signal decode task when frame is ready (only once per frame)
     if (!frame_decoded && all_rs_blocks_decodable()) {
         frame_decoded = 1;
+
+        // Snapshot frame state into decode buffers under mutex.
+        // The decode task copies from these snapshots, so it can safely
+        // decode even if the sniffer has moved on to the next frame.
+        if (xSemaphoreTake(decode_mutex, 0) == pdTRUE) {
+            memcpy(decode_buf, frame_buf, sizeof(decode_buf));
+            memcpy(decode_rs_block_received, rs_block_received, sizeof(decode_rs_block_received));
+            decode_rs_block_count = rs_block_count;
+            xSemaphoreGive(decode_mutex);
+        }
+
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         xSemaphoreGiveFromISR(rs_decode_semaphore, &xHigherPriorityTaskWoken);
         if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
@@ -459,7 +520,7 @@ void WiFiManager::Begin()
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
     esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA,  WIFI_PHY_RATE_2M_L);
+    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA,  WIFI_PHY_RATE_24M); //WIFI_PHY_RATE_2M_L
     esp_wifi_start();
     esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
     ESP_LOGI(WIFI_MANAGER_TAG, "TX started on channel %d", CONFIG_WIFI_CHANNEL);
@@ -483,6 +544,7 @@ void WiFiManager::Begin()
 
     // Create RS decode task (offloaded from WiFi task to prevent heap corruption)
     rs_decode_semaphore = xSemaphoreCreateBinary();
+    decode_mutex = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(rs_decode_task_fn, "rs_decode", 4096, nullptr, 5, &rs_decode_task_handle, 1);
 
     ESP_LOGI(WIFI_MANAGER_TAG, "RX started on channel %d", CONFIG_WIFI_CHANNEL);

@@ -3,5 +3,5 @@ idf_component_register(
     "ProjectConfig/ProjectConfig.cpp"
   INCLUDE_DIRS
     "ProjectConfig"
-  REQUIRES Preferences Helpers
+  REQUIRES Preferences Helpers esp_wifi
 )

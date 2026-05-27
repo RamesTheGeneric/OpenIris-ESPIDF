@@ -1,4 +1,5 @@
 #include "ProjectConfig.hpp"
+#include "esp_wifi.h"
 
 static auto CONFIGURATION_TAG = "[CONFIGURATION]";
 
@@ -197,7 +198,11 @@ void ProjectConfig::deleteWifiConfig(const std::string &networkName)
 void ProjectConfig::setWiFiTxPower(uint8_t power)
 {
   this->config.txpower.power = power;
-  ESP_LOGD(CONFIGURATION_TAG, "Updating wifi tx power");
+  uint8_t clamped = power;
+  if (clamped < 8) clamped = 8;
+  if (clamped > 84) clamped = 84;
+  esp_wifi_set_max_tx_power(clamped);
+  ESP_LOGI(CONFIGURATION_TAG, "TX power set to %d (0.25dBm units)", clamped);
 }
 
 void ProjectConfig::setAPWifiConfig(const std::string &ssid,

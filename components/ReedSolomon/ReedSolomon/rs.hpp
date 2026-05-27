@@ -212,9 +212,18 @@ public:
         // Error happened while finding errors (so helpful :D)
         if(err->length == 0) return 1;
 
-        /* Adding found errors with known */
+        /* Adding found errors with known (dedup to prevent CorrectErrata division-by-zero) */
         for(uint8_t i = 0; i < err->length; i++) {
-            epos->Append(err->at(i));
+            bool duplicate = false;
+            for(uint8_t j = 0; j < epos->length; j++) {
+                if(epos->at(j) == err->at(i)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if(!duplicate) {
+                epos->Append(err->at(i));
+            }
         }
 
         // Correcting errors

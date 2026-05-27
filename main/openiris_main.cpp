@@ -235,6 +235,7 @@ extern "C" void app_main(void)
     ESP_LOGI("[MAIN]", "Set WiFi Manger jpeg callback");
     #endif
     wifiManager.Begin();
+    deviceConfig->setWiFiTxPower(CONFIG_WIFI_TX_POWER);
     mdnsManager.start();
     restAPI->begin();
     #ifndef CONFIG_RX_MODE

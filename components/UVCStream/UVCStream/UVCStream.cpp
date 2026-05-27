@@ -83,23 +83,32 @@ static uvc_fb_t *UVCStreamHelpers::camera_fb_get_cb(void *cb_ctx)
   s_fb.uvc_fb.format = UVC_FORMAT_JPEG; // we gotta make sure we're ALWAYS using JPEG
   s_fb.uvc_fb.timestamp = s_fb.cam_fb_p->timestamp;
   #else
-  if (xSemaphoreTake(frame_ready_sem, pdMS_TO_TICKS(50)) != pdTRUE)
-  {
-    ESP_LOGW(UVC_STREAM_TAG, "FB_CB: semaphore timeout, no frame ready");
-    return nullptr; // Timeout - no frame available
+  // Check if a frame is already available (decode finished before we were called)
+  if (uxSemaphoreGetCount(frame_ready_sem) == 0) {
+    // No frame yet — wait up to 200ms for RS decode to finish
+    if (xSemaphoreTake(frame_ready_sem, pdMS_TO_TICKS(200)) != pdTRUE)
+    {
+      ESP_LOGW(UVC_STREAM_TAG, "FB_CB: semaphore timeout, no frame ready");
+      return nullptr;
+    }
+  } else {
+    // Frame already decoded — take immediately
+    xSemaphoreTake(frame_ready_sem, 0);
   }
   // Get Self Contained jpeg frame here
   if (jpeg_s_fb.buf == nullptr || jpeg_s_fb.len == 0) {
     ESP_LOGW(UVC_STREAM_TAG, "FB_CB: buffer null or zero length");
     return nullptr;
   }
-  s_fb.uvc_fb.buf = jpeg_s_fb.buf;
+  // Copy to static buffer to prevent corruption from concurrent provide_jpeg_frame
+  memcpy(uvc_frame_buf, jpeg_s_fb.buf, jpeg_s_fb.len);
+  s_fb.uvc_fb.buf = uvc_frame_buf;
   s_fb.uvc_fb.len = jpeg_s_fb.len;
   s_fb.uvc_fb.width = frameWidth;
   s_fb.uvc_fb.height = frameHeight;
   s_fb.uvc_fb.format = UVC_FORMAT_JPEG; // we gotta make sure we're ALWAYS using JPEG
   s_fb.uvc_fb.timestamp = static_cast<timeval>(esp_timer_get_time());
-  ESP_LOGI(UVC_STREAM_TAG, "FB_CB: frame captured %zu bytes, buf=%p", jpeg_s_fb.len, (void*)jpeg_s_fb.buf);
+  ESP_LOGI(UVC_STREAM_TAG, "FB_CB: frame captured %zu bytes, buf=%p", jpeg_s_fb.len, (void*)uvc_frame_buf);
   #endif
 
   if (s_fb.uvc_fb.len > UVC_MAX_FRAMESIZE_SIZE)

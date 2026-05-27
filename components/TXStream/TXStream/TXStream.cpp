@@ -108,114 +108,79 @@ void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
         memset(parityBuf, 0, FEC_RS_PARITY_CHUNKS * MAX_PAYLOAD_SIZE);
         rs_encode_block(dataBuf, parityBuf);
 
-        // Transmit all 12 chunks (8 data + 4 parity) for this RS block
-        // Data chunks
-        for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
-            uint8_t buffer[1500] = {0};
-            wifi_ieee80211_data_hdr_t *hdr = (wifi_ieee80211_data_hdr_t *)buffer;
-            hdr->frame_control[0] = 0x08;
-            hdr->frame_control[1] = 0x00;
-            hdr->duration[0] = 0x00;
-            hdr->duration[1] = 0x00;
-            memset(hdr->addr1, 0xFF, 6);
-            esp_wifi_get_mac(WIFI_IF_STA, hdr->addr2);
-            memcpy(hdr->addr3, hdr->addr2, 6);
-            hdr->seq_ctrl[0] = (seq & 0x0F) << 4;
-            hdr->seq_ctrl[1] = (seq >> 4);
-            seq = (seq + 1) & 0x0FFF;
+        // Interleaved chunk transmission: D0, P0, D1, P1, D2, P2, D3, P3, P4, P5, P6, P7
+        // Alternating data/parity spreads losses across both types so bursts are recoverable.
+        {
+            uint8_t data_idx = 0;
+            uint8_t parity_idx = 0;
+            for (uint8_t i = 0; i < FEC_RS_TOTAL_CHUNKS; i++) {
+                uint8_t chunk_id;
+                uint8_t chunk_type;
+                const uint8_t* src;
 
-            uint8_t *llc_snap = buffer + sizeof(wifi_ieee80211_data_hdr_t);
-            *llc_snap++ = 0xAA;
-            *llc_snap++ = 0xAA;
-            *llc_snap++ = 0x03;
-            *llc_snap++ = 0x00;
-            *llc_snap++ = 0x00;
-            *llc_snap++ = 0x00;
-            *llc_snap++ = 0x88;
-            *llc_snap++ = 0xB5;
+                if ((i % 2 == 0) && (data_idx < FEC_RS_DATA_CHUNKS)) {
+                    chunk_id = data_idx;
+                    chunk_type = 0;
+                    src = dataBuf + data_idx * MAX_PAYLOAD_SIZE;
+                    data_idx++;
+                } else {
+                    chunk_id = FEC_RS_DATA_CHUNKS + parity_idx;
+                    chunk_type = 1;
+                    src = parityBuf + parity_idx * MAX_PAYLOAD_SIZE;
+                    parity_idx++;
+                }
 
-            uint8_t *custom_hdr = llc_snap;
-            memcpy(custom_hdr, vendor_oui, 3);
-            custom_hdr += 3;
-            *custom_hdr++ = frame_id;
-            *custom_hdr++ = block;
-            *custom_hdr++ = c;
-            *custom_hdr++ = FEC_RS_TOTAL_CHUNKS;
-            *custom_hdr++ = 0;
-            *custom_hdr++ = (MAX_PAYLOAD_SIZE >> 8) & 0xFF;
-            *custom_hdr++ = MAX_PAYLOAD_SIZE & 0xFF;
+                uint8_t buffer[1500] = {0};
+                wifi_ieee80211_data_hdr_t *hdr = (wifi_ieee80211_data_hdr_t *)buffer;
+                hdr->frame_control[0] = 0x08;
+                hdr->frame_control[1] = 0x00;
+                hdr->duration[0] = 0x00;
+                hdr->duration[1] = 0x00;
+                memset(hdr->addr1, 0xFF, 6);
+                esp_wifi_get_mac(WIFI_IF_STA, hdr->addr2);
+                memcpy(hdr->addr3, hdr->addr2, 6);
+                hdr->seq_ctrl[0] = (seq & 0x0F) << 4;
+                hdr->seq_ctrl[1] = (seq >> 4);
+                seq = (seq + 1) & 0x0FFF;
 
-            memcpy(custom_hdr, dataBuf + c * MAX_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE);
-            custom_hdr += MAX_PAYLOAD_SIZE;
+                uint8_t *llc_snap = buffer + sizeof(wifi_ieee80211_data_hdr_t);
+                *llc_snap++ = 0xAA;
+                *llc_snap++ = 0xAA;
+                *llc_snap++ = 0x03;
+                *llc_snap++ = 0x00;
+                *llc_snap++ = 0x00;
+                *llc_snap++ = 0x00;
+                *llc_snap++ = 0x88;
+                *llc_snap++ = 0xB5;
 
-            size_t frame_len = custom_hdr - buffer;
-            esp_err_t result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
-            if (result != ESP_OK) {
-                // Retry up to 3 times with backoff on TX failure
-                for (int retry = 0; retry < 3; retry++) {
-                    vTaskDelay(pdMS_TO_TICKS(5));
-                    result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
-                    if (result == ESP_OK) break;
+                uint8_t *custom_hdr = llc_snap;
+                memcpy(custom_hdr, vendor_oui, 3);
+                custom_hdr += 3;
+                *custom_hdr++ = frame_id;
+                *custom_hdr++ = block;
+                *custom_hdr++ = chunk_id;
+                *custom_hdr++ = FEC_RS_TOTAL_CHUNKS;
+                *custom_hdr++ = chunk_type;
+                *custom_hdr++ = (MAX_PAYLOAD_SIZE >> 8) & 0xFF;
+                *custom_hdr++ = MAX_PAYLOAD_SIZE & 0xFF;
+
+                memcpy(custom_hdr, src, MAX_PAYLOAD_SIZE);
+                custom_hdr += MAX_PAYLOAD_SIZE;
+
+                size_t frame_len = custom_hdr - buffer;
+                esp_err_t result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
+                if (result == ESP_ERR_NO_MEM) {
+                    for (int retry = 0; retry < 20; retry++) {
+                        vTaskDelay(pdMS_TO_TICKS(2));
+                        result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
+                        if (result == ESP_OK) break;
+                    }
                 }
                 if (result != ESP_OK) {
-                    printf("TX failed chunk %d: %s\n", c, esp_err_to_name(result));
+                    printf("TX failed chunk %d: %s\n", chunk_id, esp_err_to_name(result));
                 }
+                vTaskDelay(pdMS_TO_TICKS(2));
             }
-            vTaskDelay(pdMS_TO_TICKS(8));
-        }
-
-        // Parity chunks
-        for (uint8_t p = 0; p < FEC_RS_PARITY_CHUNKS; p++) {
-            uint8_t buffer[1500] = {0};
-            wifi_ieee80211_data_hdr_t *hdr = (wifi_ieee80211_data_hdr_t *)buffer;
-            hdr->frame_control[0] = 0x08;
-            hdr->frame_control[1] = 0x00;
-            hdr->duration[0] = 0x00;
-            hdr->duration[1] = 0x00;
-            memset(hdr->addr1, 0xFF, 6);
-            esp_wifi_get_mac(WIFI_IF_STA, hdr->addr2);
-            memcpy(hdr->addr3, hdr->addr2, 6);
-            hdr->seq_ctrl[0] = (seq & 0x0F) << 4;
-            hdr->seq_ctrl[1] = (seq >> 4);
-            seq = (seq + 1) & 0x0FFF;
-
-            uint8_t *llc_snap = buffer + sizeof(wifi_ieee80211_data_hdr_t);
-            *llc_snap++ = 0xAA;
-            *llc_snap++ = 0xAA;
-            *llc_snap++ = 0x03;
-            *llc_snap++ = 0x00;
-            *llc_snap++ = 0x00;
-            *llc_snap++ = 0x00;
-            *llc_snap++ = 0x88;
-            *llc_snap++ = 0xB5;
-
-            uint8_t *custom_hdr = llc_snap;
-            memcpy(custom_hdr, vendor_oui, 3);
-            custom_hdr += 3;
-            *custom_hdr++ = frame_id;
-            *custom_hdr++ = block;
-            *custom_hdr++ = FEC_RS_DATA_CHUNKS + p;
-            *custom_hdr++ = FEC_RS_TOTAL_CHUNKS;
-            *custom_hdr++ = 1;
-            *custom_hdr++ = (MAX_PAYLOAD_SIZE >> 8) & 0xFF;
-            *custom_hdr++ = MAX_PAYLOAD_SIZE & 0xFF;
-
-            memcpy(custom_hdr, parityBuf + p * MAX_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE);
-            custom_hdr += MAX_PAYLOAD_SIZE;
-
-            size_t frame_len = custom_hdr - buffer;
-            esp_err_t result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
-            if (result != ESP_OK) {
-                for (int retry = 0; retry < 3; retry++) {
-                    vTaskDelay(pdMS_TO_TICKS(5));
-                    result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
-                    if (result == ESP_OK) break;
-                }
-                if (result != ESP_OK) {
-                    printf("TX failed parity %d: %s\n", p, esp_err_to_name(result));
-                }
-            }
-            vTaskDelay(pdMS_TO_TICKS(0.01));
         }
 
         printf("  RS block %d: %d data + %d parity chunks sent\n",

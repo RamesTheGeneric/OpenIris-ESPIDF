@@ -67,4 +67,18 @@ menu "OpenIris basic configuration"
     config AP_WIFI_PASSWORD
         string "AP WiFi password"
         default "12345678"
+
+    config WIFI_TX_POWER
+        int "WiFi TX power (0.25 dBm units, range 8-84 = 2-20 dBm)"
+        range 8 84
+        default 52
+        help
+            WiFi transmission power in 0.25 dBm units.
+            Range: 8 (2 dBm) to 84 (20 dBm).
+            Common values:
+              8   =  2 dBm  (minimum)
+             20   =  5 dBm
+             52   = 13 dBm  (default)
+             80   = 20 dBm  (maximum)
+            Applied at boot. Can be overridden at runtime via the API.
 endmenu
