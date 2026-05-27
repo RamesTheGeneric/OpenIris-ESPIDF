@@ -499,8 +499,14 @@ static void sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t t)
         }
     }
 
-    // Signal decode task when frame is ready (only once per frame)
-    if (!frame_decoded && all_rs_blocks_decodable()) {
+    // Signal decode task when frame is ready (only once per frame).
+    // Must have all blocks decodable AND all expected RS blocks accounted for.
+    // expected_chunks = numRsBlocks * FEC_RS_TOTAL_CHUNKS (from TX header),
+    // so expected_rs_blocks = expected_chunks / FEC_RS_TOTAL_CHUNKS.
+    // This guard prevents triggering on partial multi-block frames before
+    // later blocks' data has arrived.
+    if (!frame_decoded && all_rs_blocks_decodable() &&
+        rs_block_count >= expected_chunks / FEC_RS_TOTAL_CHUNKS) {
         frame_decoded = 1;
 
         // Snapshot frame state into decode buffers under mutex.

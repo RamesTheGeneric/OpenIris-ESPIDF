@@ -92,6 +92,9 @@ void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
     uint8_t numRsBlocks = (numDataChunks + FEC_RS_DATA_CHUNKS - 1) / FEC_RS_DATA_CHUNKS;
     if (numRsBlocks > FEC_MAX_RS_BLOCKS) numRsBlocks = FEC_MAX_RS_BLOCKS;
 
+    // Total chunks across all RS blocks (RX needs this to know when frame is complete)
+    uint8_t totalFrameChunks = numRsBlocks * FEC_RS_TOTAL_CHUNKS;
+
     printf("Sending frame %d with %d data chunks, %d RS blocks (%d bytes total)\n",
            frame_id, numDataChunks, numRsBlocks, (int)len);
 
@@ -176,7 +179,7 @@ void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
                 *custom_hdr++ = frame_id;
                 *custom_hdr++ = block;
                 *custom_hdr++ = chunk_id;
-                *custom_hdr++ = FEC_RS_TOTAL_CHUNKS;
+                *custom_hdr++ = totalFrameChunks;
                 *custom_hdr++ = chunk_type;
                 *custom_hdr++ = (MAX_PAYLOAD_SIZE >> 8) & 0xFF;
                 *custom_hdr++ = MAX_PAYLOAD_SIZE & 0xFF;
