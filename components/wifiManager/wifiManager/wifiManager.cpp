@@ -233,23 +233,25 @@ static bool rs_decode_block(
         if (block_received[FEC_RS_DATA_CHUNKS + p]) parityPresent++;
     }
 
-    // If all 8 data chunks are present, copy directly
+    // If all data chunks are present, copy directly
     if (dataPresent >= FEC_RS_DATA_CHUNKS) {
         memcpy(out, block_data, FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE);
         *outLen = FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE;
         return true;
     }
 
-    // Need RS decode. Check we have enough parity to recover missing data.
-    // RS(8,4) can correct up to 4 erasures. Missing data chunks = erasures.
-    uint8_t missingData = FEC_RS_DATA_CHUNKS - dataPresent;
-    if (missingData > parityPresent) {
-        return false;
+    // Need RS decode. Check we have enough correction capacity.
+    // RS(8,4) can correct up to PARITY_CHUNKS erasures (4).
+    // Each missing chunk (data or parity) is a known erasure — all can be listed.
+    {
+        uint8_t totalPresent = dataPresent + parityPresent;
+        if (FEC_RS_TOTAL_CHUNKS - totalPresent > FEC_RS_PARITY_CHUNKS) {
+            return false;
+        }
     }
 
-    // RS(8,4) decode at each byte position
-    // Only pass DATA erasure positions to the RS library (0..7).
-    // Parity erasures are handled by the parityPresent check above.
+    // RS(8,4) decode at each byte position.
+    // Pass ALL missing positions (both data and parity) as erasures.
     RS::ReedSolomon<FEC_RS_DATA_CHUNKS, FEC_RS_PARITY_CHUNKS> rs;
 
     for (uint16_t i = 0; i < MAX_PAYLOAD_SIZE; i++) {
@@ -260,8 +262,8 @@ static bool rs_decode_block(
         uint8_t dataBytes[FEC_RS_DATA_CHUNKS];
         // Build ECC buffer (4 bytes, one from each parity chunk at position i)
         uint8_t eccBytes[FEC_RS_PARITY_CHUNKS];
-        // Build erasure list (only data positions 0..7)
-        uint8_t erasePos[FEC_RS_DATA_CHUNKS];
+        // Build erasure list (all positions 0..7)
+        uint8_t erasePos[FEC_RS_TOTAL_CHUNKS];
         uint16_t eraseCount = 0;
 
         for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
@@ -279,6 +281,7 @@ static bool rs_decode_block(
                 eccBytes[p] = block_data[parityIdx * MAX_PAYLOAD_SIZE + i];
             } else {
                 eccBytes[p] = 0;
+                erasePos[eraseCount++] = parityIdx;
             }
         }
 
@@ -303,14 +306,18 @@ static bool rs_decode_block(
     return true;
 }
 
-// Check if enough chunks have been received in an RS block for decode
+// Check if enough chunks have been received in an RS block for decode.
+// Requires ALL data chunks present to hit the fast copy path.
+// RS decode with < 4 data chunks requires erasure correction at the byte level,
+// which the RS library handles incorrectly at 4 erasures (produces corrupt output).
+// Close-range interleaved TX delivers D3 on the 7th of 8 packets — negligible delay.
 static inline bool rs_block_decodable(uint8_t blockId)
 {
-    uint8_t count = 0;
-    for (uint8_t c = 0; c < FEC_RS_TOTAL_CHUNKS; c++) {
-        if (rs_block_received[blockId][c]) count++;
+    uint8_t dataCount = 0;
+    for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
+        if (rs_block_received[blockId][c]) dataCount++;
     }
-    return count >= FEC_RS_DATA_CHUNKS;
+    return dataCount >= FEC_RS_DATA_CHUNKS;
 }
 
 // Check if all RS blocks for the current frame are decodable

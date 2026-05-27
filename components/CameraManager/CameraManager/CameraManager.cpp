@@ -19,7 +19,7 @@ void CameraManager::setupCameraPinout()
   // 16500000 optimal freq on ESP32-CAM (default)
   // 20000000 max freq on ESP32-CAM
   // 24000000 optimal freq on ESP32-S3
-  int xclk_freq_hz = DEFAULT_XCLK_FREQ_HZ;
+  int xclk_freq_hz = USB_DEFAULT_XCLK_FREQ_HZ;
 
 #if CONFIG_CAMERA_MODULE_ESP_EYE
   /* IO13, IO14 is designed for JTAG by default,
@@ -132,15 +132,15 @@ void CameraManager::setupCameraSensor()
                                    0);              // 0 = disable , 1 = enable
   camera_sensor->set_aec2(camera_sensor, 0);        // 0 = disable , 1 = enable
   camera_sensor->set_ae_level(camera_sensor, 0);    // -2 to 2
-  camera_sensor->set_aec_value(camera_sensor, 300); // 0 to 1200
+  camera_sensor->set_aec_value(camera_sensor, 600); // 0 to 1200
 
   // controls the gain
   camera_sensor->set_gain_ctrl(camera_sensor, 0); // 0 = disable , 1 = enable
 
   // automatic gain control gain, controls by how much the resulting image
   // should be amplified
-  camera_sensor->set_agc_gain(camera_sensor, 1);                   // 0 to 30
-  camera_sensor->set_gainceiling(camera_sensor, (gainceiling_t)1); // 0 to 6
+  camera_sensor->set_agc_gain(camera_sensor, 3);                   // 0 to 30
+  camera_sensor->set_gainceiling(camera_sensor, (gainceiling_t)3); // 0 to 6
 
   // black and white pixel correction, averages the white and black spots
   camera_sensor->set_bpc(camera_sensor, 1); // 0 = disable , 1 = enable

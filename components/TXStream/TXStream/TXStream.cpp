@@ -60,10 +60,27 @@ static void rs_encode_block(
     }
 }
 
+static SemaphoreHandle_t s_tx_done_sem = nullptr;
+
+static void tx_done_callback(const esp_80211_tx_info_t *tx_info)
+{
+    (void)tx_info;
+    xSemaphoreGive(s_tx_done_sem);
+}
+
 void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
 {
     static uint8_t frame_id = 0;
     static uint16_t seq = 0;
+    static bool tx_cb_registered = false;
+
+    if (!tx_cb_registered) {
+        s_tx_done_sem = xSemaphoreCreateBinary();
+        if (s_tx_done_sem) {
+            esp_wifi_register_80211_tx_cb(tx_done_callback);
+        }
+        tx_cb_registered = true;
+    }
 
     if (!jpeg || len == 0) return;
 
@@ -168,18 +185,25 @@ void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
                 custom_hdr += MAX_PAYLOAD_SIZE;
 
                 size_t frame_len = custom_hdr - buffer;
+                // Clear stale completion signal before queuing
+                xSemaphoreTake(s_tx_done_sem, 0);
+
                 esp_err_t result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
-                if (result == ESP_ERR_NO_MEM) {
-                    for (int retry = 0; retry < 20; retry++) {
-                        vTaskDelay(pdMS_TO_TICKS(2));
-                        result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
-                        if (result == ESP_OK) break;
+
+                if (result == ESP_OK) {
+                    // Wait for hardware to finish transmitting (provides natural backpressure)
+                    xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(50));
+                } else if (result == ESP_ERR_NO_MEM) {
+                    // Descriptor ring full — wait for current TX to drain, then retry
+                    xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(50));
+                    result = esp_wifi_80211_tx(WIFI_IF_STA, buffer, frame_len, false);
+                    if (result == ESP_OK) {
+                        xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(50));
                     }
                 }
                 if (result != ESP_OK) {
                     printf("TX failed chunk %d: %s\n", chunk_id, esp_err_to_name(result));
                 }
-                vTaskDelay(pdMS_TO_TICKS(2));
             }
         }
 

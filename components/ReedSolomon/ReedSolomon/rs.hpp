@@ -73,7 +73,7 @@ public:
         static bool    generator_cached = false;
 
         /* Allocating memory on stack for polynomials storage */
-        uint8_t stack_memory[MSG_CNT * msg_length + POLY_CNT * ecc_length * 2];
+        uint8_t stack_memory[MSG_CNT * (msg_length + ecc_length) + POLY_CNT * ecc_length * 2];
         this->memory = stack_memory;
 
         const uint8_t* src_ptr = (const uint8_t*) src;
@@ -149,7 +149,7 @@ public:
         bool ok;
 
         /* Allocation memory on stack */
-        uint8_t stack_memory[MSG_CNT * msg_length + POLY_CNT * ecc_length * 2];
+        uint8_t stack_memory[MSG_CNT * (msg_length + ecc_length) + POLY_CNT * ecc_length * 2];
         this->memory = stack_memory;
 
         Poly *msg_in  = &polynoms[ID_MSG_IN];
@@ -210,7 +210,9 @@ public:
         if(!ok) return 1;
 
         // Error happened while finding errors (so helpful :D)
-        if(err->length == 0) return 1;
+        // err->length == 0 is valid when all errors were known erasures
+        // (eloc->length == 1 means no unknown errors to find)
+        if(err->length == 0 && eloc->length > 1) return 1;
 
         /* Adding found errors with known (dedup to prevent CorrectErrata division-by-zero) */
         for(uint8_t i = 0; i < err->length; i++) {
@@ -483,7 +485,8 @@ private:
         while(err_loc->length && err_loc->at(shift) == 0) shift++;
 
         uint32_t errs = err_loc->length - shift - 1;
-        if(((errs - erase_count) * 2 + erase_count) > ecc_length){
+        uint32_t unknown = (errs > erase_count) ? (errs - erase_count) : 0;
+        if(unknown * 2 + erase_count > ecc_length){
             return false; /* Error count is greater than we can fix! */
         }
 
