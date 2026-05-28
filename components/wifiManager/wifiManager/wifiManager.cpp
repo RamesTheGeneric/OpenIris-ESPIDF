@@ -9,7 +9,7 @@ static auto WIFI_MANAGER_TAG = "[WIFI_MANAGER]";
 #define MAX_CHUNKS 512
 #define VENDOR_OUI          {0xAC,0xDE,0x47}
 static const uint8_t vendor_oui[3] = VENDOR_OUI;
-#define MAX_PAYLOAD_SIZE 1400
+#define MAX_PAYLOAD_SIZE 350
 #define MAX_FRAME_SIZE (50*1024)
 #define UART_PORT UART_NUM_0
 
@@ -20,7 +20,7 @@ static const uint8_t vendor_oui[3] = VENDOR_OUI;
 #define FEC_RS_DATA_CHUNKS   4
 #define FEC_RS_PARITY_CHUNKS 4
 #define FEC_RS_TOTAL_CHUNKS  8
-#define FEC_MAX_RS_BLOCKS    4
+#define FEC_MAX_RS_BLOCKS    16
 
 static uint8_t frame_buf[MAX_FRAME_SIZE];
 static uint8_t current_frame_id = 0xFF;
@@ -533,7 +533,7 @@ void WiFiManager::Begin()
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
     esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA,  WIFI_PHY_RATE_24M); //WIFI_PHY_RATE_2M_L
+    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA,  WIFI_PHY_RATE_9M); //WIFI_PHY_RATE_2M_L
     esp_wifi_start();
     esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
     ESP_LOGI(WIFI_MANAGER_TAG, "TX started on channel %d", CONFIG_WIFI_CHANNEL);

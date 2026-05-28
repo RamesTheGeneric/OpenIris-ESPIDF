@@ -12,7 +12,7 @@
 #include <cstring>
 
 #ifndef MAX_PAYLOAD_SIZE
-#define MAX_PAYLOAD_SIZE 1400
+#define MAX_PAYLOAD_SIZE 350
 #endif
 
 // 802.11 Frame Control for data frames
@@ -27,8 +27,8 @@
 #define FEC_RS_PARITY_CHUNKS 4
 #define FEC_RS_TOTAL_CHUNKS  8
 
-// Maximum RS blocks per frame (4 RS blocks = ~45KB max JPEG)
-#define FEC_MAX_RS_BLOCKS    4
+// Maximum RS blocks per frame (16 RS blocks = ~22KB max JPEG)
+#define FEC_MAX_RS_BLOCKS    16
 
 static const uint8_t vendor_oui[3] = {0xAC,0xDE,0x47}; //Right = {0xAC,0xDE,0x48}  ||  Left == {0xAC,0xDE,0x47}
 
