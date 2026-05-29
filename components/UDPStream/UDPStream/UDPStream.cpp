@@ -135,30 +135,9 @@ static bool send_udp_chunk(int sock,
     }
 
     uint16_t packet_len = sizeof(udp_frame_hdr_t) + UDP_CHUNK_SIZE;
-    int delay_ms = 1;
-    int total_waited = 0;
-    bool logged = false;
-    for (;;) {
-        int sent = sendto(sock, packet, packet_len, 0,
-                          (const struct sockaddr*)dest_addr, sizeof(*dest_addr));
-        if (sent == packet_len) {
-            if (logged) {
-                ESP_LOGI("[UDP_CHUNK]", "send recovered after ~%dms", total_waited);
-            }
-            return true;
-        }
-        if (!logged) {
-            ESP_LOGW("[UDP_CHUNK]", "send failed errno=%d, retrying (backoff %dms)", errno, delay_ms);
-            logged = true;
-        }
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-        total_waited += delay_ms;
-        if (delay_ms < 50) delay_ms *= 2;
-        if (total_waited > 1000) {
-            ESP_LOGE("[UDP_CHUNK]", "send failed after ~%dms, giving up", total_waited);
-            return false;
-        }
-    }
+    int sent = sendto(sock, packet, packet_len, MSG_DONTWAIT,
+                      (const struct sockaddr*)dest_addr, sizeof(*dest_addr));
+    return sent == packet_len;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +170,7 @@ bool UDPStream::sendFrame(int sock, const camera_fb_t* fb)
 
     const uint8_t* jpegPtr = jpeg;
     size_t jpegRemaining = len;
+    uint16_t dropped = 0;
 
     for (uint8_t block = 0; block < numRsBlocks; block++) {
         memset(dataBuf, 0, UDP_RS_DATA_CHUNKS * UDP_CHUNK_SIZE);
@@ -228,10 +208,15 @@ bool UDPStream::sendFrame(int sock, const camera_fb_t* fb)
             if (!send_udp_chunk(sock, &_dest_addr, _frame_id, block,
                                 chunk_id, chunk_type, totalChunks,
                                 src, UDP_CHUNK_SIZE)) {
-                ESP_LOGW(TAG, "Failed to send chunk block=%d chunk=%d", block, chunk_id);
+                dropped++;
             }
             taskYIELD();
         }
+    }
+
+    if (dropped > 0) {
+        ESP_LOGW(TAG, "Frame #%u: %u/%u chunks dropped",
+                 _frame_id, dropped, totalChunks);
     }
 
     free(dataBuf);
@@ -261,7 +246,6 @@ void UDPStream::streamTaskFn(void* arg)
     }
 
     ESP_LOGI(self->TAG, "UDP stream task started");
-    esp_log_level_set("[UDP_CHUNK]", ESP_LOG_INFO);
     esp_log_level_set(self->TAG, ESP_LOG_INFO);
 
     // Send a dummy HELO packet to confirm UDP actually leaves the device
