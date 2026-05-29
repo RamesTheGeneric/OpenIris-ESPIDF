@@ -28,8 +28,11 @@ class StreamServer
     httpd_handle_t camera_stream = nullptr;
 
    public:
+    static volatile bool udpStreamActive;
+
     StreamServer(const int STREAM_PORT, StateManager* StateManager);
     esp_err_t startStreamServer();
+    static void setUdpActive(bool active) { udpStreamActive = active; }
 
     esp_err_t stream(httpd_req_t* req);
     esp_err_t ws_logs_handle(httpd_req_t* req);

@@ -6,6 +6,8 @@ constexpr static const char* STREAM_PART = "Content-Type: image/jpeg\r\nContent-
 
 static const char* STREAM_SERVER_TAG = "[STREAM_SERVER]";
 
+volatile bool StreamServer::udpStreamActive = false;
+
 StreamServer::StreamServer(const int STREAM_PORT, StateManager* stateManager) : STREAM_SERVER_PORT(STREAM_PORT), stateManager(stateManager) {}
 
 esp_err_t StreamHelpers::stream(httpd_req_t* req)
@@ -40,6 +42,12 @@ esp_err_t StreamHelpers::stream(httpd_req_t* req)
 
     while (true)
     {
+        // Check if UDP streaming is active — if so, pause MJPEG
+        if (StreamServer::udpStreamActive) {
+            ESP_LOGI(STREAM_SERVER_TAG, "UDP stream active, pausing MJPEG stream");
+            break;
+        }
+
         fb = esp_camera_fb_get();
 
         if (!fb)

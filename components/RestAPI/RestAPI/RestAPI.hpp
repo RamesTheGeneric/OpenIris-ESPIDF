@@ -6,10 +6,13 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <cstdint>
 
 #include "esp_log.h"
 
 #define JSON_RESPONSE "Content-Type: application/json\r\n"
+
+class UDPStream;
 
 struct RequestContext
 {
@@ -36,13 +39,16 @@ class RestAPI
 
     mg_mgr mgr;
     std::shared_ptr<CommandManager> command_manager;
+    UDPStream* _udpStream = nullptr;
 
    private:
     void handle_endpoint_command(RequestContext* context, std::string allowed_method, CommandType command_type, int success_code, int error_code);
+    void handle_udp_start(struct mg_connection* connection, struct mg_http_message* message);
+    void handle_udp_stop(struct mg_connection* connection, struct mg_http_message* message);
 
    public:
-    // this will also need command manager
     RestAPI(std::string url, std::shared_ptr<CommandManager> command_manager);
+    void setUdpStream(UDPStream* stream) { _udpStream = stream; }
     void begin();
     void handle_request(struct mg_connection* connection, int event, void* event_data);
     void poll();

@@ -35,9 +35,10 @@ esp_err_t MDNSManager::start()
     mdns_txt_item_t serviceTxtData[3] = {
         {"stream_port", "80"},
         {"api_port", "81"},
+        {"udp_port", "12345"},
     };
 
-    mdns_service_add(nullptr, mdnsName.c_str(), "_tcp", 80, serviceTxtData, 2);
+    mdns_service_add(nullptr, mdnsName.c_str(), "_tcp", 80, serviceTxtData, 3);
     result = mdns_service_instance_name_set(mdnsName.c_str(), "_tcp", mdnsName.c_str());
     if (result != ESP_OK)
     {

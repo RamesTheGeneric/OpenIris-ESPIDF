@@ -194,6 +194,35 @@ menu "OpenIris: LED Configuration"
 
 endmenu
 
+menu "OpenIris: UDP Streaming"
+
+    config UDP_STREAM_ENABLE
+        bool "Enable UDP streaming mode"
+        default y
+        depends on GENERAL_ENABLE_WIRELESS
+        help
+            When enabled, the /api/stream/udp/start endpoint can be used to stream
+            JPEG frames over UDP with Reed-Solomon FEC. MJPEG streaming is paused
+            while UDP streaming is active.
+
+    config UDP_STREAM_PORT
+        int "UDP streaming target port"
+        default 8989
+        range 1024 65535
+        help
+            Default UDP port to send video frames to. The client can override
+            this by specifying a port in the start request body.
+
+    config UDP_STREAM_FPS
+        int "Target UDP stream frame rate"
+        default 30
+        range 1 60
+        help
+            Desired frames per second for the UDP stream. Actual FPS depends
+            on camera performance and WiFi conditions.
+
+endmenu
+
 menu "OpenIris: Monitoring"
 
     config MONITORING_LED_CURRENT

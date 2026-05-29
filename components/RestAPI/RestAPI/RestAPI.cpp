@@ -1,4 +1,5 @@
 #include "RestAPI.hpp"
+#include <UDPStream.hpp>
 
 #include <utility>
 
@@ -9,9 +10,6 @@
 
 bool getIsSuccess(const nlohmann::json& response)
 {
-    // since the commandManager will be returning CommandManagerResponse to simplify parsing on the clients end
-    // we can slightly its json representation, and extract the status from there
-    // note: This will only work for commands executed with CommandManager::executeFromType().
     if (!response.contains("result"))
     {
         return false;
@@ -22,20 +20,6 @@ bool getIsSuccess(const nlohmann::json& response)
 
 RestAPI::RestAPI(std::string url, std::shared_ptr<CommandManager> commandManager) : command_manager(commandManager)
 {
-    // until we stumble on a simpler way to handle the commands over the rest api
-    // the formula will be like this:
-    // each command gets its own endpoint
-    // each endpoint must include the action it performs in its path
-    // for example
-    // /get/ for getters
-    // /set/ for posts
-    // /delete/ for deletes
-    // /update/ for updates
-    // additional actions on the resource should be appended after the resource name
-    // like for example /api/set/config/save/
-    //
-    // one endpoint must not contain more than one action
-
     this->url = std::move(url);
     // updates via PATCH
     routes.emplace("/api/update/wifi/", RequestBaseData(PATCH_METHOD, CommandType::UPDATE_WIFI, 200, 400));
@@ -89,6 +73,18 @@ void RestAPI::handle_request(struct mg_connection* connection, int event, void* 
         auto const* message = static_cast<struct mg_http_message*>(event_data);
         auto const uri = std::string(message->uri.buf, message->uri.len);
 
+        // Handle UDP stream endpoints directly (need client IP from connection)
+        if (uri == "/api/stream/udp/start" && std::string(message->method.buf, message->method.len) == "POST")
+        {
+            handle_udp_start(connection, const_cast<struct mg_http_message*>(message));
+            return;
+        }
+        if (uri == "/api/stream/udp/stop" && std::string(message->method.buf, message->method.len) == "POST")
+        {
+            handle_udp_stop(connection, const_cast<struct mg_http_message*>(message));
+            return;
+        }
+
         if (this->routes.find(uri) == this->routes.end())
         {
             mg_http_reply(connection, 404, "", "Wrong URL");
@@ -126,6 +122,66 @@ void HandleRestAPIPollTask(void* pvParameter)
         rest_api_handler->poll();
         vTaskDelay(1000);
     }
+}
+
+// ---------------------------------------------------------------------------
+// UDP stream start/stop handlers (bypass CommandManager, need client IP)
+// ---------------------------------------------------------------------------
+void RestAPI::handle_udp_start(struct mg_connection* connection, struct mg_http_message* message)
+{
+    if (!_udpStream) {
+        mg_http_reply(connection, 500, JSON_RESPONSE, "{\"status\":\"error\",\"message\":\"UDP stream not available\"}");
+        return;
+    }
+
+    // Extract client IP from connection peer address
+    char peer_str[48];
+    mg_snprintf(peer_str, sizeof(peer_str), "%M", mg_print_ip, &connection->rem);
+    uint32_t client_ip = 0;
+    // Parse dotted-decimal IP
+    unsigned int b[4] = {0};
+    if (sscanf(peer_str, "%u.%u.%u.%u", &b[0], &b[1], &b[2], &b[3]) == 4) {
+        client_ip = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
+    }
+
+    if (client_ip == 0) {
+        mg_http_reply(connection, 400, JSON_RESPONSE, "{\"status\":\"error\",\"message\":\"Could not determine client IP\"}");
+        return;
+    }
+
+    // Parse optional port from JSON body
+    uint16_t port = CONFIG_UDP_STREAM_PORT;
+    if (message->body.len > 0) {
+        double port_val;
+        if (mg_json_get_num(message->body, "$.port", &port_val)) {
+            int parsed_port = (int)port_val;
+            if (parsed_port > 0 && parsed_port <= 65535) {
+                port = (uint16_t)parsed_port;
+            }
+        }
+    }
+
+    if (!_udpStream->start(client_ip, port)) {
+        mg_http_reply(connection, 409, JSON_RESPONSE,
+            "{\"status\":\"error\",\"message\":\"UDP stream already active or failed to start\"}");
+        return;
+    }
+
+    mg_http_reply(connection, 200, JSON_RESPONSE,
+        "{\"status\":\"success\",\"data\":{\"port\":%u,\"client_ip\":\"%s\"}}", port, peer_str);
+}
+
+void RestAPI::handle_udp_stop(struct mg_connection* connection, struct mg_http_message* message)
+{
+    (void)message;
+    if (!_udpStream) {
+        mg_http_reply(connection, 500, JSON_RESPONSE, "{\"status\":\"error\",\"message\":\"UDP stream not available\"}");
+        return;
+    }
+
+    _udpStream->stop();
+
+    mg_http_reply(connection, 200, JSON_RESPONSE, "{\"status\":\"success\"}");
 }
 
 void RestAPI::handle_endpoint_command(RequestContext* context, std::string allowed_method, CommandType command_type, int success_code, int error_code)

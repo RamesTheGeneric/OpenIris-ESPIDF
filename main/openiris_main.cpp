@@ -31,6 +31,10 @@
 #include <UVCStream.hpp>
 #endif
 
+#ifdef CONFIG_UDP_STREAM_ENABLE
+#include <UDPStream.hpp>
+#endif
+
 // defines to configure nlohmann-json for esp32
 #define JSON_NO_IO 1
 #define JSON_NOEXCEPTION 1
@@ -77,6 +81,10 @@ std::shared_ptr<MonitoringManager> monitoringManager = std::make_shared<Monitori
 #endif
 
 auto* serialManager = new SerialManager(commandManager, &timerHandle);
+
+#ifdef CONFIG_UDP_STREAM_ENABLE
+UDPStream udpStream;
+#endif
 
 void startWiFiMode();
 void startWiredMode(bool shouldCloseSerialManager);
@@ -213,6 +221,20 @@ void startWiFiMode()
 #ifdef CONFIG_GENERAL_ENABLE_WIRELESS
     wifiManager->Begin();
     mdnsManager.start();
+
+    // Init camera AFTER WiFi connects to avoid GDMA stall
+    // (cam_hal.c: GDMA falls into strange state if running while WiFi STA connects)
+    {
+        static bool cameraInited = false;
+        if (!cameraInited) {
+            cameraHandler->setupCamera();
+            cameraInited = true;
+        }
+    }
+
+#ifdef CONFIG_UDP_STREAM_ENABLE
+    restAPI->setUdpStream(&udpStream);
+#endif
     restAPI->begin();
     StreamingMode mode = deviceConfig->getDeviceMode();
     // don't enable in SETUP mode
@@ -280,8 +302,6 @@ extern "C" void app_main(void)
     );
 
     xTaskCreate(HandleLEDDisplayTask, "HandleLEDDisplayTask", 1024 * 2, ledManager.get(), 3, nullptr);
-
-    cameraHandler->setupCamera();
 
     // let's keep the serial manager running for the duration of the setup
     // we'll clean it up later if need be
