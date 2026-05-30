@@ -1,6 +1,5 @@
 #include "wifiManager.hpp"
-#define RS_NO_ASSERT
-#include "rs.hpp"
+#include "fec.h"
 #include <new>
 
 static auto WIFI_MANAGER_TAG = "[WIFI_MANAGER]";
@@ -206,118 +205,91 @@ void WiFiManager::SetupAccessPoint()
   ESP_LOGI(WIFI_MANAGER_TAG, "AP started.");
 }
 
-// ---------------------------------------------------------------------------
-// RS(8,4) decode a single RS block at the byte-position level.
-//
-// For each of the 1400 byte positions, collect available symbols from all
-// received chunks (data + parity) and RS-decode to recover the 8 data bytes.
-// If all 8 data chunks are present, copy directly without decode.
-//
-// block_data:    pointer to the interleaved chunk data for this block
-//                (FEC_RS_TOTAL_CHUNKS * MAX_PAYLOAD_SIZE bytes)
-// block_received: 12-byte presence flags for this block's chunks
-// ---------------------------------------------------------------------------
+static fec_t* s_fec = nullptr;
+
 static bool rs_decode_block(
     const uint8_t* block_data,
     const uint8_t* block_received,
     uint8_t* out,
     size_t* outLen)
 {
-    // Count how many data and parity chunks are present
+    // Count present chunks
+    uint8_t totalPresent = 0;
     uint8_t dataPresent = 0;
-    uint8_t parityPresent = 0;
     for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
-        if (block_received[c]) dataPresent++;
+        if (block_received[c]) { totalPresent++; dataPresent++; }
     }
     for (uint8_t p = 0; p < FEC_RS_PARITY_CHUNKS; p++) {
-        if (block_received[FEC_RS_DATA_CHUNKS + p]) parityPresent++;
+        if (block_received[FEC_RS_DATA_CHUNKS + p]) totalPresent++;
     }
 
-    // If all data chunks are present, copy directly
-    if (dataPresent >= FEC_RS_DATA_CHUNKS) {
+    if (totalPresent < FEC_RS_DATA_CHUNKS) return false;
+
+    // All data present — fast copy
+    if (dataPresent == FEC_RS_DATA_CHUNKS) {
         memcpy(out, block_data, FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE);
         *outLen = FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE;
         return true;
     }
 
-    // Need RS decode. Check we have enough correction capacity.
-    // RS(8,4) can correct up to PARITY_CHUNKS erasures (4).
-    // Each missing chunk (data or parity) is a known erasure — all can be listed.
-    {
-        uint8_t totalPresent = dataPresent + parityPresent;
-        if (FEC_RS_TOTAL_CHUNKS - totalPresent > FEC_RS_PARITY_CHUNKS) {
-            return false;
-        }
-    }
+    // Arrange k received chunks for zfec: primary data at natural slots,
+    // secondary parity filling holes for missing data.
+    const gf* inpkts[FEC_RS_DATA_CHUNKS];
+    unsigned index[FEC_RS_DATA_CHUNKS];
 
-    // RS(8,4) decode at each byte position.
-    // Pass ALL missing positions (both data and parity) as erasures.
-    RS::ReedSolomon<FEC_RS_DATA_CHUNKS, FEC_RS_PARITY_CHUNKS> rs;
-
-    for (uint16_t i = 0; i < MAX_PAYLOAD_SIZE; i++) {
-        // Yield periodically to prevent task watchdog timeout
-        if (i % 256 == 0 && i != 0) taskYIELD();
-
-        // Build data buffer (8 bytes, one from each data chunk at position i)
-        uint8_t dataBytes[FEC_RS_DATA_CHUNKS];
-        // Build ECC buffer (4 bytes, one from each parity chunk at position i)
-        uint8_t eccBytes[FEC_RS_PARITY_CHUNKS];
-        // Build erasure list (all positions 0..7)
-        uint8_t erasePos[FEC_RS_TOTAL_CHUNKS];
-        uint16_t eraseCount = 0;
-
-        for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
-            if (block_received[c]) {
-                dataBytes[c] = block_data[c * MAX_PAYLOAD_SIZE + i];
-            } else {
-                dataBytes[c] = 0;
-                erasePos[eraseCount++] = c;
-            }
-        }
-
-        for (uint8_t p = 0; p < FEC_RS_PARITY_CHUNKS; p++) {
-            uint8_t parityIdx = FEC_RS_DATA_CHUNKS + p;
-            if (block_received[parityIdx]) {
-                eccBytes[p] = block_data[parityIdx * MAX_PAYLOAD_SIZE + i];
-            } else {
-                eccBytes[p] = 0;
-                erasePos[eraseCount++] = parityIdx;
-            }
-        }
-
-        // Decode using DecodeBlock: separate data and ECC buffers
-        uint8_t decoded[FEC_RS_DATA_CHUNKS];
-        if (eraseCount > 0) {
-            int err = rs.DecodeBlock(dataBytes, eccBytes, decoded, erasePos, eraseCount);
-            if (err != 0) {
-                return false;
-            }
+    uint8_t nextSecondary = 0;
+    for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
+        if (block_received[c]) {
+            inpkts[c] = block_data + c * MAX_PAYLOAD_SIZE;
+            index[c] = c;
         } else {
-            memcpy(decoded, dataBytes, FEC_RS_DATA_CHUNKS);
-        }
-
-        // Write decoded bytes to output (one byte per data chunk at position i)
-        for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
-            out[c * MAX_PAYLOAD_SIZE + i] = decoded[c];
+            while (nextSecondary < FEC_RS_PARITY_CHUNKS &&
+                   !block_received[FEC_RS_DATA_CHUNKS + nextSecondary])
+                nextSecondary++;
+            if (nextSecondary >= FEC_RS_PARITY_CHUNKS) return false;
+            uint8_t secIdx = FEC_RS_DATA_CHUNKS + nextSecondary;
+            inpkts[c] = block_data + secIdx * MAX_PAYLOAD_SIZE;
+            index[c] = secIdx;
+            nextSecondary++;
         }
     }
 
+    // Temporary space for reconstructed missing data chunks
+    uint8_t* reconstructed = new (std::nothrow) uint8_t[FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE];
+    if (!reconstructed) return false;
+    memset(reconstructed, 0, FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE);
+
+    gf* outpkts[FEC_RS_DATA_CHUNKS];
+    for (uint8_t i = 0; i < FEC_RS_DATA_CHUNKS; i++)
+        outpkts[i] = reconstructed + i * MAX_PAYLOAD_SIZE;
+
+    fec_decode(s_fec, inpkts, outpkts, index, MAX_PAYLOAD_SIZE);
+
+    // Copy: present data from block_data, reconstructed from outpkts
+    uint8_t outix = 0;
+    for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
+        if (block_received[c]) {
+            memcpy(out + c * MAX_PAYLOAD_SIZE, block_data + c * MAX_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE);
+        } else {
+            memcpy(out + c * MAX_PAYLOAD_SIZE, outpkts[outix], MAX_PAYLOAD_SIZE);
+            outix++;
+        }
+    }
+
+    delete[] reconstructed;
     *outLen = FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE;
     return true;
 }
 
 // Check if enough chunks have been received in an RS block for decode.
-// Requires ALL data chunks present to hit the fast copy path.
-// RS decode with < 4 data chunks requires erasure correction at the byte level,
-// which the RS library handles incorrectly at 4 erasures (produces corrupt output).
-// Close-range interleaved TX delivers D3 on the 7th of 8 packets — negligible delay.
+// RS(4,4) can correct up to 4 known erasures — any 4 of the 8 chunks suffice.
 static inline bool rs_block_decodable(uint8_t blockId)
 {
-    uint8_t dataCount = 0;
-    for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
-        if (rs_block_received[blockId][c]) dataCount++;
+    uint8_t totalPresent = 0;
+    for (uint8_t c = 0; c < FEC_RS_TOTAL_CHUNKS; c++) {
+        if (rs_block_received[blockId][c]) totalPresent++;
     }
-    return dataCount >= FEC_RS_DATA_CHUNKS;
+    return totalPresent >= FEC_RS_DATA_CHUNKS;
 }
 
 // Check if all RS blocks for the current frame are decodable
@@ -554,6 +526,12 @@ void WiFiManager::Begin()
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&filter));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(sniffer_cb));
     esp_wifi_set_promiscuous(true);
+
+    // Initialize zfec FEC library
+    if (!s_fec) {
+        init_fec();
+        s_fec = fec_new(FEC_RS_DATA_CHUNKS, FEC_RS_TOTAL_CHUNKS);
+    }
 
     // Create RS decode task (offloaded from WiFi task to prevent heap corruption)
     rs_decode_semaphore = xSemaphoreCreateBinary();

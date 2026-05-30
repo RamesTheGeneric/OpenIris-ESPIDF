@@ -1,3 +1,3 @@
-idf_component_register(SRCS "ReedSolomon/rs.hpp"
+idf_component_register(SRCS "ReedSolomon/fec.cpp"
   INCLUDE_DIRS "ReedSolomon"
 )

@@ -30,34 +30,25 @@ void TXStream::startStream()
     }
 }
 
-// ---------------------------------------------------------------------------
-// RS(8,4) encode a single RS block at the byte-position level.
-//
-// For each of the 1400 byte positions, collect one byte from each of the
-// 8 data chunks and RS-encode into 4 parity bytes.
-// ---------------------------------------------------------------------------
+static fec_t* s_fec = nullptr;
+
 static void rs_encode_block(
-    const uint8_t* dataBuf,    // FEC_RS_DATA_CHUNKS * MAX_PAYLOAD_SIZE bytes
-    uint8_t* parityBuf)       // FEC_RS_PARITY_CHUNKS * MAX_PAYLOAD_SIZE bytes
+    const uint8_t* dataBuf,
+    uint8_t* parityBuf)
 {
-    RS::ReedSolomon<FEC_RS_DATA_CHUNKS, FEC_RS_PARITY_CHUNKS> rs;
-    uint8_t rsSrc[FEC_RS_DATA_CHUNKS];
-    uint8_t rsEcc[FEC_RS_PARITY_CHUNKS];
+    const gf* src[FEC_RS_DATA_CHUNKS];
+    gf* dst[FEC_RS_PARITY_CHUNKS];
+    unsigned block_nums[FEC_RS_PARITY_CHUNKS];
 
-    for (uint16_t i = 0; i < MAX_PAYLOAD_SIZE; i++) {
-        // Collect one byte from each data chunk at position i
-        for (uint8_t c = 0; c < FEC_RS_DATA_CHUNKS; c++) {
-            rsSrc[c] = dataBuf[c * MAX_PAYLOAD_SIZE + i];
-        }
+    for (uint8_t i = 0; i < FEC_RS_DATA_CHUNKS; i++)
+        src[i] = dataBuf + i * MAX_PAYLOAD_SIZE;
 
-        // RS encode: 8 data bytes -> 4 parity bytes
-        rs.EncodeBlock(rsSrc, rsEcc);
-
-        // Store parity bytes in parity chunks at position i
-        for (uint8_t p = 0; p < FEC_RS_PARITY_CHUNKS; p++) {
-            parityBuf[p * MAX_PAYLOAD_SIZE + i] = rsEcc[p];
-        }
+    for (uint8_t i = 0; i < FEC_RS_PARITY_CHUNKS; i++) {
+        dst[i] = parityBuf + i * MAX_PAYLOAD_SIZE;
+        block_nums[i] = FEC_RS_DATA_CHUNKS + i;
     }
+
+    fec_encode(s_fec, src, dst, block_nums, FEC_RS_PARITY_CHUNKS, MAX_PAYLOAD_SIZE);
 }
 
 static SemaphoreHandle_t s_tx_done_sem = nullptr;
@@ -80,6 +71,11 @@ void TXStream::send_jpeg_frame(const uint8_t *jpeg, size_t len)
             esp_wifi_register_80211_tx_cb(tx_done_callback);
         }
         tx_cb_registered = true;
+    }
+
+    if (!s_fec) {
+        init_fec();
+        s_fec = fec_new(FEC_RS_DATA_CHUNKS, FEC_RS_TOTAL_CHUNKS);
     }
 
     if (!jpeg || len == 0) return;
