@@ -4,6 +4,8 @@
 #include <errno.h>
 #include "esp_wifi.h"
 
+static fec_t* s_fec = nullptr;
+
 UDPStream::UDPStream() {}
 
 UDPStream::~UDPStream()
@@ -29,7 +31,6 @@ bool UDPStream::start(uint32_t client_ip, uint16_t client_port)
 
     _active = true;
 
-    // Disable WiFi modem sleep — prevents silent UDP packet drops by WiFi driver
     esp_wifi_set_ps(WIFI_PS_NONE);
     ESP_LOGI(TAG, "WiFi power save disabled");
 
@@ -57,7 +58,6 @@ void UDPStream::stop()
     if (!_active) return;
     _active = false;
 
-    // Signal the task to exit cleanly and wait (up to 3s)
     if (_task) {
         xTaskNotifyGive(_task);
         for (int i = 0; i < 30; i++) {
@@ -71,7 +71,7 @@ void UDPStream::stop()
     }
     esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
     StreamServer::setUdpActive(false);
-    ESP_LOGI(TAG, "UDP stream stopped — WiFi power save restored");
+    ESP_LOGI(TAG, "UDP stream stopped \u2014 WiFi power save restored");
 }
 
 bool UDPStream::isActive() const
@@ -79,37 +79,25 @@ bool UDPStream::isActive() const
     return _active;
 }
 
-// ---------------------------------------------------------------------------
-// RS(8,4) encode a single block at the byte-position level.
-// For each of the 350 byte positions, collect one byte from each data chunk,
-// RS-encode into 4 parity bytes, and distribute across parity chunks.
-// ---------------------------------------------------------------------------
 static void rs_encode_block(
     const uint8_t* dataBuf,
     uint8_t* parityBuf)
 {
-    RS::ReedSolomon<UDP_RS_DATA_CHUNKS, UDP_RS_PARITY_CHUNKS> rs;
-    uint8_t rsSrc[UDP_RS_DATA_CHUNKS];
-    uint8_t rsEcc[UDP_RS_PARITY_CHUNKS];
+    const gf* src[UDP_RS_DATA_CHUNKS];
+    gf* dst[UDP_RS_PARITY_CHUNKS];
+    unsigned block_nums[UDP_RS_PARITY_CHUNKS];
 
-    for (uint16_t i = 0; i < UDP_CHUNK_SIZE; i++) {
-        if (i % 64 == 0 && i != 0) taskYIELD();
+    for (uint8_t i = 0; i < UDP_RS_DATA_CHUNKS; i++)
+        src[i] = dataBuf + i * UDP_CHUNK_SIZE;
 
-        for (uint8_t c = 0; c < UDP_RS_DATA_CHUNKS; c++) {
-            rsSrc[c] = dataBuf[c * UDP_CHUNK_SIZE + i];
-        }
-
-        rs.EncodeBlock(rsSrc, rsEcc);
-
-        for (uint8_t p = 0; p < UDP_RS_PARITY_CHUNKS; p++) {
-            parityBuf[p * UDP_CHUNK_SIZE + i] = rsEcc[p];
-        }
+    for (uint8_t i = 0; i < UDP_RS_PARITY_CHUNKS; i++) {
+        dst[i] = parityBuf + i * UDP_CHUNK_SIZE;
+        block_nums[i] = UDP_RS_DATA_CHUNKS + i;
     }
+
+    fec_encode(s_fec, src, dst, block_nums, UDP_RS_PARITY_CHUNKS, UDP_CHUNK_SIZE);
 }
 
-// ---------------------------------------------------------------------------
-// Send a single UDP packet (header + chunk payload)
-// ---------------------------------------------------------------------------
 static bool send_udp_chunk(int sock,
                             const struct sockaddr_in* dest_addr,
                             uint8_t frame_id, uint8_t rs_block_id,
@@ -140,11 +128,17 @@ static bool send_udp_chunk(int sock,
     return sent == packet_len;
 }
 
-// ---------------------------------------------------------------------------
-// RS-encode and send a single JPEG frame
-// ---------------------------------------------------------------------------
 bool UDPStream::sendFrame(int sock, const camera_fb_t* fb)
 {
+    if (!s_fec) {
+        init_fec();
+        s_fec = fec_new(UDP_RS_DATA_CHUNKS, UDP_RS_TOTAL_CHUNKS);
+        if (!s_fec) {
+            ESP_LOGE(TAG, "Failed to initialize zfec encoder");
+            return false;
+        }
+    }
+
     size_t len = fb->len;
     const uint8_t* jpeg = fb->buf;
 
@@ -224,9 +218,6 @@ bool UDPStream::sendFrame(int sock, const camera_fb_t* fb)
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Stream task: capture frames, RS-encode, send via UDP
-// ---------------------------------------------------------------------------
 void UDPStream::streamTaskFn(void* arg)
 {
     auto* self = static_cast<UDPStream*>(arg);
@@ -248,8 +239,7 @@ void UDPStream::streamTaskFn(void* arg)
     ESP_LOGI(self->TAG, "UDP stream task started");
     esp_log_level_set(self->TAG, ESP_LOG_INFO);
 
-    // Send a dummy HELO packet to confirm UDP actually leaves the device
-    uint8_t helo[] = {0x48, 0x45, 0x4C, 0x4F};  // "HELO"
+    uint8_t helo[] = {0x48, 0x45, 0x4C, 0x4F};
     int helo_sent = sendto(sock, helo, sizeof(helo), 0,
                            (const struct sockaddr*)&self->_dest_addr,
                            sizeof(self->_dest_addr));
@@ -269,7 +259,6 @@ void UDPStream::streamTaskFn(void* arg)
 
         int fps = CONFIG_UDP_STREAM_FPS;
         if (fps <= 0) fps = 30;
-        // Wait for next frame or stop notification
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000 / fps));
     }
 

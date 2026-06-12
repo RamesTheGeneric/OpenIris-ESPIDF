@@ -11,7 +11,7 @@
 #include "esp_camera.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
-#include "rs.hpp"
+#include "fec.h"
 
 #define UDP_MAGIC           0x4952
 #define UDP_RS_DATA_CHUNKS   4

@@ -79,6 +79,8 @@ dkms.conf
 managed_components/
 build/
 sdkconfig
+dist/
+python_viewer/OpenIrisViewer.spec
 
 ### VisualStudioCode ###
 .vscode/*
@@ -99,3 +101,4 @@ tests/.env
 .history
 .ionide
 *\__pycache__
+/python_viewer/env
